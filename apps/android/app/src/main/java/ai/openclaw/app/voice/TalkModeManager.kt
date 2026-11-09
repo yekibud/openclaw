@@ -112,19 +112,6 @@ internal sealed interface TalkPttOnceStart {
   ) : TalkPttOnceStart
 }
 
-internal suspend fun requestPhoneRealtimeSessionWithLanguageFallback(
-  language: String?,
-  request: suspend (language: String?) -> String,
-): String =
-  try {
-    request(language)
-  } catch (err: GatewayRequestRejected) {
-    if (language == null || !err.gatewayError.isUnsupportedSessionLanguageParam()) {
-      throw err
-    }
-    request(null)
-  }
-
 private enum class TalkStatusState {
   Off,
   Active,
@@ -3208,9 +3195,3 @@ internal fun requireAcceptedRealtimeOutputCancellation(
   }
   return result
 }
-
-private fun GatewaySession.ErrorShape.isUnsupportedSessionLanguageParam(): Boolean =
-  code == "INVALID_REQUEST" &&
-    message
-      .lowercase(Locale.ROOT)
-      .contains("invalid talk.session.create params")

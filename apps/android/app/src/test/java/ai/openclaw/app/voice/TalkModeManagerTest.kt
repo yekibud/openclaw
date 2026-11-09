@@ -11,6 +11,7 @@ import ai.openclaw.app.gateway.GatewayConnectOptions
 import ai.openclaw.app.gateway.GatewayEndpoint
 import ai.openclaw.app.gateway.GatewayRequestRejected
 import ai.openclaw.app.gateway.GatewaySession
+import ai.openclaw.app.gateway.syntheticGatewayRequestLease
 import ai.openclaw.app.gateway.testDeviceIdentityStore
 import ai.openclaw.app.i18n.NativeStringResources
 import ai.openclaw.app.i18n.NativeText
@@ -4189,7 +4190,7 @@ class TalkModeManagerTest {
         null
       } else {
         val lease =
-          GatewaySession.RequestLease("synthetic-gateway") { method, paramsJson, _, enqueue ->
+          syntheticGatewayRequestLease("synthetic-gateway") { method, paramsJson, _, enqueue ->
             enqueue { onRequest(method, paramsJson) }
             "{}"
           }

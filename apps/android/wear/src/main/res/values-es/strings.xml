@@ -125,9 +125,74 @@
     <string name="reply_previous_page" tools:ignore="MissingTranslation,Typos,TypographyDashes,TypographyEllipsis">"Parte anterior"</string>
     <string name="reply_next_page" tools:ignore="MissingTranslation,Typos,TypographyDashes,TypographyEllipsis">"Siguiente parte"</string>
     <string name="reply_loading" tools:ignore="MissingTranslation,Typos,TypographyDashes,TypographyEllipsis">"Cargando la respuesta completa…"</string>
-    <string name="reply_unsupported" tools:ignore="MissingTranslation,Typos,TypographyDashes,TypographyEllipsis">"Actualiza la aplicación del teléfono y Gateway para leer las respuestas completas."</string>
-    <string name="reply_too_large" tools:ignore="MissingTranslation,Typos,TypographyDashes,TypographyEllipsis">"Esta respuesta es demasiado larga para leerla aquí. Ábrela en tu teléfono."</string>
+    <string name="reply_unsupported" tools:ignore="MissingTranslation,Typos,TypographyDashes,TypographyEllipsis">"Update OpenClaw and the Gateway to read full replies."</string>
+    <string name="reply_too_large" tools:ignore="MissingTranslation,Typos,TypographyDashes,TypographyEllipsis">"This reply is too large to read here. Open it in Gateway chat."</string>
     <string name="reply_changed" tools:ignore="MissingTranslation,Typos,TypographyDashes,TypographyEllipsis">"La respuesta o la conexión han cambiado. Vuelve a intentarlo desde el principio."</string>
     <string name="reply_unavailable" tools:ignore="MissingTranslation,Typos,TypographyDashes,TypographyEllipsis">"El texto completo ya no está disponible."</string>
     <string name="reply_failed" tools:ignore="MissingTranslation,Typos,TypographyDashes,TypographyEllipsis">"No se pudo cargar la respuesta completa. Inténtalo de nuevo."</string>
+    <string name="watch_connection" tools:ignore="MissingTranslation,Typos,TypographyDashes,TypographyEllipsis">"Conexión"</string>
+    <string name="watch_phone_proxy" tools:ignore="MissingTranslation,Typos,TypographyDashes,TypographyEllipsis">"Phone Proxy"</string>
+    <string name="watch_setup_code" tools:ignore="MissingTranslation,Typos,TypographyDashes,TypographyEllipsis">"Enter limited setup code"</string>
+    <string name="watch_updating_connection" tools:ignore="MissingTranslation,Typos,TypographyDashes,TypographyEllipsis">"Updating connection"</string>
+    <string name="watch_connect" tools:ignore="MissingTranslation,Typos,TypographyDashes,TypographyEllipsis">"Conectar"</string>
+    <string name="watch_forget" tools:ignore="MissingTranslation,Typos,TypographyDashes,TypographyEllipsis">"Olvidar Gateway"</string>
+    <string name="watch_forget_confirmation" tools:ignore="MissingTranslation,Typos,TypographyDashes,TypographyEllipsis">"Remove this Gateway and its credentials from this watch?"</string>
+    <string name="watch_confirm_forget" tools:ignore="MissingTranslation,Typos,TypographyDashes,TypographyEllipsis">"Confirm forget"</string>
+    <string name="watch_certificate" tools:ignore="MissingTranslation,Typos,TypographyDashes,TypographyEllipsis">"Verify Gateway SHA-256 certificate"</string>
+    <string name="watch_previous_certificate" tools:ignore="MissingTranslation,Typos,TypographyDashes,TypographyEllipsis">"Previous: %1$s"</string>
+    <string name="watch_trust_certificate" tools:ignore="MissingTranslation,Typos,TypographyDashes,TypographyEllipsis">"Confiar en el certificado"</string>
+    <string name="watch_reject_certificate" tools:ignore="MissingTranslation,Typos,TypographyDashes,TypographyEllipsis">"Reject certificate"</string>
+    <string name="watch_sessions" tools:ignore="MissingTranslation,Typos,TypographyDashes,TypographyEllipsis">"Sesiones"</string>
+    <string name="watch_message_unconfirmed" tools:ignore="MissingTranslation,Typos,TypographyDashes,TypographyEllipsis">"Delivery unconfirmed. Refresh history before retrying."</string>
+    <string name="watch_discard_message" tools:ignore="MissingTranslation,Typos,TypographyDashes,TypographyEllipsis">"Discard message"</string>
+    <string name="watch_approval" tools:ignore="MissingTranslation,Typos,TypographyDashes,TypographyEllipsis">"Aprobación"</string>
+    <string name="watch_approvals" tools:ignore="MissingTranslation,Typos,TypographyDashes,TypographyEllipsis">"Aprobaciones"</string>
+    <string name="watch_approval_unconfirmed" tools:ignore="MissingTranslation,Typos,TypographyDashes,TypographyEllipsis">"Outcome unconfirmed. Refresh before deciding again."</string>
+    <string name="watch_approvals_unavailable" tools:ignore="MissingTranslation,Typos,TypographyDashes,TypographyEllipsis">"Approval review unavailable. Refresh to reconnect the session stream."</string>
+    <string name="watch_approvals_incomplete" tools:ignore="MissingTranslation,Typos,TypographyDashes,TypographyEllipsis">"Only part of this session\'s approvals is available. Review the rest on another surface."</string>
+    <string name="watch_no_approvals" tools:ignore="MissingTranslation,Typos,TypographyDashes,TypographyEllipsis">"No pending approvals in this session."</string>
+    <string name="watch_confirm_decision" tools:ignore="MissingTranslation,Typos,TypographyDashes,TypographyEllipsis">"Confirm: %1$s"</string>
+    <string name="watch_allow_once" tools:ignore="MissingTranslation,Typos,TypographyDashes,TypographyEllipsis">"Permitir una vez"</string>
+    <string name="watch_allow_always" tools:ignore="MissingTranslation,Typos,TypographyDashes,TypographyEllipsis">"Always allow"</string>
+    <string name="watch_deny" tools:ignore="MissingTranslation,Typos,TypographyDashes,TypographyEllipsis">"Denegar"</string>
+    <string name="watch_stop" tools:ignore="MissingTranslation,Typos,TypographyDashes,TypographyEllipsis">"Detener"</string>
+    <string name="watch_disconnect" tools:ignore="MissingTranslation,Typos,TypographyDashes,TypographyEllipsis">"Desconectar"</string>
+    <string name="watch_reconnect" tools:ignore="MissingTranslation,Typos,TypographyDashes,TypographyEllipsis">"Volver a conectar"</string>
+    <string name="watch_talk_stop" tools:ignore="MissingTranslation,Typos,TypographyDashes,TypographyEllipsis">"Detener conversación"</string>
+    <string name="watch_location_off" tools:ignore="MissingTranslation,Typos,TypographyDashes,TypographyEllipsis">"Share location: Off"</string>
+    <string name="watch_location_on" tools:ignore="MissingTranslation,Typos,TypographyDashes,TypographyEllipsis">"Share location: On"</string>
+    <string name="watch_location_shared" tools:ignore="MissingTranslation,Typos,TypographyDashes,TypographyEllipsis">"The Gateway can request this watch\'s location while the app is open."</string>
+    <string name="watch_location_not_shared" tools:ignore="MissingTranslation,Typos,TypographyDashes,TypographyEllipsis">"Location session not connected. Reconnect to share it."</string>
+    <string name="watch_command_approval" tools:ignore="MissingTranslation,Typos,TypographyDashes,TypographyEllipsis">"Aprobación del comando"</string>
+    <string name="watch_approval_context_invalid" tools:ignore="MissingTranslation,Typos,TypographyDashes,TypographyEllipsis">"Some decision details are unsupported or invalid. Review this request on another approval surface before allowing it."</string>
+    <string name="watch_approval_too_large" tools:ignore="MissingTranslation,Typos,TypographyDashes,TypographyEllipsis">"This request is too large to review on the watch. Review it on another approval surface."</string>
+    <string name="watch_approval_preview" tools:ignore="MissingTranslation,Typos,TypographyDashes,TypographyEllipsis">"Preview: %1$s"</string>
+    <string name="watch_approval_warning" tools:ignore="MissingTranslation,Typos,TypographyDashes,TypographyEllipsis">"Warning: %1$s"</string>
+    <string name="watch_approval_host" tools:ignore="MissingTranslation,Typos,TypographyDashes,TypographyEllipsis">"Host: %1$s"</string>
+    <string name="watch_approval_node" tools:ignore="MissingTranslation,Typos,TypographyDashes,TypographyEllipsis">"Node: %1$s"</string>
+    <string name="watch_approval_agent" tools:ignore="MissingTranslation,Typos,TypographyDashes,TypographyEllipsis">"Agent: %1$s"</string>
+    <string name="watch_approval_plugin" tools:ignore="MissingTranslation,Typos,TypographyDashes,TypographyEllipsis">"Plugin: %1$s"</string>
+    <string name="watch_approval_tool" tools:ignore="MissingTranslation,Typos,TypographyDashes,TypographyEllipsis">"Tool: %1$s"</string>
+    <string name="watch_approval_proposal" tools:ignore="MissingTranslation,Typos,TypographyDashes,TypographyEllipsis">"Proposal: %1$s"</string>
+    <string name="watch_approval_severity_info" tools:ignore="MissingTranslation,Typos,TypographyDashes,TypographyEllipsis">"Severity: Information"</string>
+    <string name="watch_approval_severity_warning" tools:ignore="MissingTranslation,Typos,TypographyDashes,TypographyEllipsis">"Severity: Warning"</string>
+    <string name="watch_approval_severity_critical" tools:ignore="MissingTranslation,Typos,TypographyDashes,TypographyEllipsis">"Severity: Critical"</string>
+    <string name="watch_approval_external_resolution" tools:ignore="MissingTranslation,Typos,TypographyDashes,TypographyEllipsis">"External resolution: %1$s"</string>
+    <string name="watch_scope_message" tools:ignore="MissingTranslation,Typos,TypographyDashes,TypographyEllipsis">"Message delivery"</string>
+    <string name="watch_scope_payment" tools:ignore="MissingTranslation,Typos,TypographyDashes,TypographyEllipsis">"Payment"</string>
+    <string name="watch_scope_post" tools:ignore="MissingTranslation,Typos,TypographyDashes,TypographyEllipsis">"External publication"</string>
+    <string name="watch_scope_standing_grant" tools:ignore="MissingTranslation,Typos,TypographyDashes,TypographyEllipsis">"Standing grant"</string>
+    <string name="watch_scope_target" tools:ignore="MissingTranslation,Typos,TypographyDashes,TypographyEllipsis">"Target: %1$s"</string>
+    <string name="watch_scope_recipient_count" tools:ignore="MissingTranslation,Typos,TypographyDashes,TypographyEllipsis">"Recipient count: %1$s"</string>
+    <string name="watch_scope_recipient" tools:ignore="MissingTranslation,Typos,TypographyDashes,TypographyEllipsis">"Recipient: %1$s"</string>
+    <string name="watch_scope_audience_internal" tools:ignore="MissingTranslation,Typos,TypographyDashes,TypographyEllipsis">"Audience: Internal"</string>
+    <string name="watch_scope_audience_external" tools:ignore="MissingTranslation,Typos,TypographyDashes,TypographyEllipsis">"Audience: External"</string>
+    <string name="watch_scope_amount" tools:ignore="MissingTranslation,Typos,TypographyDashes,TypographyEllipsis">"Amount: %1$s"</string>
+    <string name="watch_scope_currency" tools:ignore="MissingTranslation,Typos,TypographyDashes,TypographyEllipsis">"Currency: %1$s"</string>
+    <string name="watch_scope_visibility_public" tools:ignore="MissingTranslation,Typos,TypographyDashes,TypographyEllipsis">"Visibility: Public"</string>
+    <string name="watch_scope_visibility_restricted" tools:ignore="MissingTranslation,Typos,TypographyDashes,TypographyEllipsis">"Visibility: Restricted"</string>
+    <string name="watch_scope_automation" tools:ignore="MissingTranslation,Typos,TypographyDashes,TypographyEllipsis">"Automation: %1$s"</string>
+    <string name="watch_scope_command" tools:ignore="MissingTranslation,Typos,TypographyDashes,TypographyEllipsis">"Command: %1$s"</string>
+    <string name="watch_scope_expiry_days" tools:ignore="MissingTranslation,Typos,TypographyDashes,TypographyEllipsis">"Expires after %1$s days"</string>
+    <string name="watch_scope_expiry_until_revoked" tools:ignore="MissingTranslation,Typos,TypographyDashes,TypographyEllipsis">"Valid until revoked or the automation changes"</string>
 </resources>

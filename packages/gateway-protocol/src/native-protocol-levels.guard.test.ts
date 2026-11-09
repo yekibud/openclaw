@@ -69,7 +69,7 @@ describe("native Gateway protocol levels", () => {
       /try await client\.connect\(\)/,
     ]);
     await assertPatterns(
-      "apps/android/app/src/main/java/ai/openclaw/app/gateway/GatewaySession.kt",
+      "apps/android/gateway-client/src/main/java/ai/openclaw/app/gateway/GatewaySession.kt",
       [
         /put\("minProtocol", JsonPrimitive\(GATEWAY_MIN_PROTOCOL_VERSION\)\)/,
         /put\("maxProtocol", JsonPrimitive\(GATEWAY_PROTOCOL_VERSION\)\)/,

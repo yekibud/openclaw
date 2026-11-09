@@ -1,7 +1,6 @@
 package ai.openclaw.app.ui
 
 import ai.openclaw.app.gateway.isLocalCleartextGatewayHost
-import ai.openclaw.app.gateway.normalizeGatewayContextPath
 import ai.openclaw.app.i18n.NativeText
 import ai.openclaw.app.i18n.nativeString
 import ai.openclaw.app.i18n.nativeText
@@ -9,17 +8,7 @@ import ai.openclaw.app.i18n.resolveNativeText
 import ai.openclaw.app.node.parseJsonParamsObject
 import ai.openclaw.app.nonBlankString
 import java.net.URI
-import java.util.Base64
 import java.util.Locale
-
-/** Parsed endpoint fields after URL validation and cleartext-safety checks. */
-internal data class GatewayEndpointConfig(
-  val host: String,
-  val port: Int,
-  val tls: Boolean,
-  val displayUrl: String,
-  val contextPath: String = "",
-)
 
 internal data class GatewayManualTransportPresentation(
   val requiresTls: Boolean,
@@ -30,14 +19,6 @@ internal data class GatewayManualTransportPresentation(
       effectiveTls -> null
       else -> nativeString("Use only on a trusted private network.")
     },
-)
-
-/** Decoded setup-code payload; only one credential family is expected to be populated. */
-internal data class GatewaySetupCode(
-  val url: String,
-  val bootstrapToken: String?,
-  val token: String?,
-  val password: String?,
 )
 
 /** Final gateway connection fields selected from setup-code or manual UI input. */
@@ -64,13 +45,6 @@ internal data class GatewayConnectPlan(
   val config: GatewayConnectConfig,
   val savedAuthAction: GatewaySavedAuthAction,
 )
-
-/** Validation reason used by setup, QR, and manual endpoint copy. */
-internal enum class GatewayEndpointValidationError {
-  INVALID_URL,
-  INSECURE_REMOTE_URL,
-  IPV6_ZONE_ID_UNSUPPORTED,
-}
 
 internal enum class GatewayEndpointInputSource(
   val insecureRemoteText: NativeText,
@@ -105,11 +79,6 @@ internal enum class GatewayEndpointInputSource(
     nativeText("QR code did not contain a valid setup code."),
   ),
 }
-
-internal data class GatewayEndpointParseResult(
-  val config: GatewayEndpointConfig? = null,
-  val error: GatewayEndpointValidationError? = null,
-)
 
 internal data class GatewayScannedSetupCodeResult(
   val setupCode: String? = null,
@@ -156,15 +125,18 @@ internal fun resolveGatewayConnectConfig(
         .ifEmpty { bootstrapTokenInput.trim() }
     // Bootstrap setup codes intentionally suppress stale shared credentials;
     // the bootstrap token owns the first authenticated pairing exchange.
+    // Locals keep null checks stable: these are public properties from another module.
+    val setupToken = setup.token?.trim().orEmpty()
+    val setupPassword = setup.password?.trim().orEmpty()
     token =
       when {
-        !setup.token.isNullOrBlank() -> setup.token.trim()
+        setupToken.isNotEmpty() -> setupToken
         bootstrapToken.isNotEmpty() -> ""
         else -> tokenInput.trim()
       }
     password =
       when {
-        !setup.password.isNullOrBlank() -> setup.password.trim()
+        setupPassword.isNotEmpty() -> setupPassword
         bootstrapToken.isNotEmpty() || token.isNotEmpty() -> ""
         else -> passwordInput.trim()
       }
@@ -236,89 +208,6 @@ private fun GatewayEndpointConfig.sameEndpoint(config: GatewayConnectConfig): Bo
     tls == config.tls &&
     contextPath == config.contextPath
 
-internal fun parseGatewayEndpoint(rawInput: String): GatewayEndpointConfig? = parseGatewayEndpointResult(rawInput).config
-
-internal fun parseGatewayEndpointResult(rawInput: String): GatewayEndpointParseResult {
-  val raw = rawInput.trim()
-  if (raw.isEmpty()) return GatewayEndpointParseResult(error = GatewayEndpointValidationError.INVALID_URL)
-
-  val normalized = if (raw.contains("://")) raw else "https://$raw"
-  val uri =
-    runCatching { URI(normalized) }
-      .getOrNull()
-      ?: return GatewayEndpointParseResult(error = GatewayEndpointValidationError.INVALID_URL)
-  if (uri.rawUserInfo != null || uri.rawQuery != null || uri.rawFragment != null) {
-    return GatewayEndpointParseResult(error = GatewayEndpointValidationError.INVALID_URL)
-  }
-  val host =
-    uri.host
-      ?.trim()
-      ?.trim('[', ']')
-      .orEmpty()
-  if (host.isEmpty()) return GatewayEndpointParseResult(error = GatewayEndpointValidationError.INVALID_URL)
-  // OkHttp rejects scoped IPv6 hosts after URI decoding, so fail before saving an endpoint that can never dial.
-  if (host.contains(':') && host.contains('%')) {
-    return GatewayEndpointParseResult(error = GatewayEndpointValidationError.IPV6_ZONE_ID_UNSUPPORTED)
-  }
-
-  val scheme =
-    uri.scheme
-      ?.trim()
-      ?.lowercase(Locale.US)
-      .orEmpty()
-  if (scheme !in setOf("ws", "wss", "http", "https")) {
-    return GatewayEndpointParseResult(error = GatewayEndpointValidationError.INVALID_URL)
-  }
-  val tls = scheme == "wss" || scheme == "https"
-  if (!tls && !isLocalCleartextGatewayHost(host)) {
-    return GatewayEndpointParseResult(error = GatewayEndpointValidationError.INSECURE_REMOTE_URL)
-  }
-  val defaultPort = if (tls) 443 else 18789
-  val port = gatewayPort(uri.port, defaultPort) ?: return GatewayEndpointParseResult(error = GatewayEndpointValidationError.INVALID_URL)
-  val contextPath = normalizeGatewayContextPath(uri.rawPath)
-  val displayHost = if (host.contains(":")) "[$host]" else host
-  val displayPortSuffix = if (tls && port == defaultPort) "" else ":$port"
-  val displayUrl = "${if (tls) "https" else "http"}://$displayHost$displayPortSuffix$contextPath"
-
-  return GatewayEndpointParseResult(
-    config =
-      GatewayEndpointConfig(
-        host = host,
-        port = port,
-        tls = tls,
-        displayUrl = displayUrl,
-        contextPath = contextPath,
-      ),
-  )
-}
-
-internal fun decodeGatewaySetupCode(rawInput: String): GatewaySetupCode? {
-  val trimmed = stripPairingSetupUrlPrefix(rawInput.trim())
-  if (trimmed.isEmpty()) return null
-
-  val padded =
-    trimmed
-      .replace('-', '+')
-      .replace('_', '/')
-      .let { normalized ->
-        val remainder = normalized.length % 4
-        if (remainder == 0) normalized else normalized + "=".repeat(4 - remainder)
-      }
-
-  return try {
-    val decoded = String(Base64.getDecoder().decode(padded), Charsets.UTF_8)
-    val obj = parseJsonParamsObject(decoded) ?: return null
-    val url = obj.nonBlankString("url").orEmpty()
-    if (url.isEmpty()) return null
-    val bootstrapToken = obj.nonBlankString("bootstrapToken")
-    val token = obj.nonBlankString("token")
-    val password = obj.nonBlankString("password")
-    GatewaySetupCode(url = url, bootstrapToken = bootstrapToken, token = token, password = password)
-  } catch (_: IllegalArgumentException) {
-    null
-  }
-}
-
 internal fun manualTokenLooksLikeSetupCode(rawInput: String): Boolean = resolveSetupCodeCandidate(rawInput)?.let(::decodeGatewaySetupCode) != null
 
 internal fun resolveScannedSetupCodeResult(rawInput: String): GatewayScannedSetupCodeResult {
@@ -364,16 +253,6 @@ internal fun gatewayEndpointValidationText(
 
 private const val defaultManualGatewayPort = 18789
 private const val tailnetTlsGatewayPort = 443
-
-private fun gatewayPort(
-  port: Int,
-  defaultPort: Int,
-): Int? =
-  when {
-    port == -1 -> defaultPort
-    port in 1..65535 -> port
-    else -> null
-  }
 
 /** Resolves the manual port default shared by onboarding, settings, and the Connect tab. */
 internal fun resolveDefaultManualGatewayPort(
@@ -494,12 +373,3 @@ private fun resolveSetupCodeCandidate(rawInput: String): String? {
   val qrSetupCode = parseJsonParamsObject(trimmed).nonBlankString("setupCode")
   return qrSetupCode ?: trimmed
 }
-
-private const val PAIRING_SETUP_URL_PREFIX = "oc-pair://"
-
-private fun stripPairingSetupUrlPrefix(raw: String): String =
-  if (raw.startsWith(PAIRING_SETUP_URL_PREFIX, ignoreCase = true)) {
-    raw.substring(PAIRING_SETUP_URL_PREFIX.length)
-  } else {
-    raw
-  }

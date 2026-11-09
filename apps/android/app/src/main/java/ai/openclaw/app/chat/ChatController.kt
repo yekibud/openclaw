@@ -27,6 +27,7 @@ import ai.openclaw.app.gateway.SessionReactionsSetParams
 import ai.openclaw.app.gateway.SessionReactionsSetResult
 import ai.openclaw.app.gateway.isInboundMediaSource
 import ai.openclaw.app.gateway.parseChatSendAck
+import ai.openclaw.app.gateway.syntheticGatewayRequestLease
 import ai.openclaw.app.i18n.NativeText
 import ai.openclaw.app.i18n.nativeText
 import ai.openclaw.app.i18n.resolveOptionalNativeText
@@ -211,7 +212,7 @@ class ChatController internal constructor(
   private val sessionRouting: () -> GatewaySessionRouting? = { null },
   private val captureRequestLease: (gatewayScope: ChatCacheScope?) -> GatewaySession.RequestLease? =
     { gatewayScope ->
-      GatewaySession.RequestLease(endpointStableId = gatewayScope?.gatewayId.orEmpty()) { method, paramsJson, _, withEnqueue ->
+      syntheticGatewayRequestLease(endpointStableId = gatewayScope?.gatewayId.orEmpty()) { method, paramsJson, _, withEnqueue ->
         withEnqueue {}
         if (gatewayScope == null) {
           requestGateway(method, paramsJson)
@@ -6086,7 +6087,7 @@ class ChatController internal constructor(
         err is GatewayRequestNotEnqueued ||
           (
             err is GatewayRequestRejected && err.gatewayError.code == "UNAVAILABLE" &&
-              err.gatewayError.details?.reason == "gateway-restarting" && err.gatewayError.details.retryable
+              err.gatewayError.details.let { details -> details != null && details.reason == "gateway-restarting" && details.retryable }
           ) -> {
           // The restart admission fence rejected before execution; preserve the same ID for reconnect.
           persist(ChatOutboxStatus.Queued, if (direct != null) err.message else err.message ?: "send failed")

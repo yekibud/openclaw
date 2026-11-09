@@ -10,8 +10,10 @@ class WearApplication : Application() {
   internal val processScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
 
   internal val proxyClient: WearProxyClient by lazy {
-    WearProxyClient.create(context = this)
+    WearProxyClient.create(context = this, captureRoute = { directRuntime.capturePhoneProxy() })
   }
+
+  internal val directRuntime: WearDirectRuntime by lazy { WearDirectRuntime(this, processScope) }
 
   internal val gatewayRepository: WearGatewayRepository by lazy {
     WearGatewayRepository(proxyClient)
@@ -21,10 +23,12 @@ class WearApplication : Application() {
 
   internal fun onActivityStarted() {
     visibleActivities.incrementAndGet()
+    directRuntime.setVisible(true)
   }
 
   internal fun onActivityStopped() {
-    visibleActivities.updateAndGet { current -> (current - 1).coerceAtLeast(0) }
+    val remaining = visibleActivities.updateAndGet { current -> (current - 1).coerceAtLeast(0) }
+    if (remaining == 0) directRuntime.setVisible(false)
   }
 
   internal fun isActivityVisible(): Boolean = visibleActivities.get() > 0

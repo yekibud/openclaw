@@ -39,7 +39,19 @@ internal fun interface WearMessageTransport {
     path: String,
     data: ByteArray,
   )
+
+  suspend fun sendGuarded(
+    nodeId: String,
+    path: String,
+    data: ByteArray,
+    guard: WearProxyEnqueueGuard,
+  ) {
+    guard {}
+    send(nodeId, path, data)
+  }
 }
+
+internal typealias WearProxyEnqueueGuard = (() -> Unit) -> Unit
 
 internal interface WearRpcRequester {
   suspend fun request(
@@ -73,6 +85,7 @@ internal class WearProxyException(
 internal class WearProxyClient(
   private val nodeResolver: WearNodeResolver,
   private val transport: WearMessageTransport,
+  private val captureRoute: () -> WearProxyEnqueueGuard = { { it() } },
 ) : WearRpcRequester {
   private val pending = ConcurrentHashMap<String, PendingWearRequest>()
   private val preferredPhoneLock = Any()
@@ -96,67 +109,12 @@ internal class WearProxyClient(
     expectedNodeId: String?,
     requirePreferredNode: Boolean,
   ): WearRpcResult {
+    val route = captureRoute()
     var attemptedPreferredPhone: PreferredPhoneRegistration? = null
     val result =
       withTimeoutOrNull(WearProtocol.RPC_REQUEST_TIMEOUT_MILLIS) {
-        // Stateful RPCs stay on the phone that supplied their session/transcript.
-        // Rediscovery here could route a shared session key to a different phone.
-        val preferredPhone =
-          when {
-            requirePreferredNode || expectedNodeId == null -> resolvePreferredPhone()
-            else -> currentPreferredPhone()?.takeIf { it.nodeId == expectedNodeId }
-          }
-        val nodeId = expectedNodeId ?: checkNotNull(preferredPhone).nodeId
-        if (requirePreferredNode && expectedNodeId != null && preferredPhone?.nodeId != expectedNodeId) {
-          throw WearProxyException("phone_changed", "Preferred phone changed during request")
-        }
-        val attemptedPhone = preferredPhone?.takeIf { it.nodeId == nodeId }
-        attemptedPreferredPhone = attemptedPhone
-        val requestId = UUID.randomUUID().toString()
-        val response = CompletableDeferred<WearMessage.Response>()
-        val pendingRequest =
-          PendingWearRequest(
-            nodeId = nodeId,
-            response = response,
-            preferredPhone = attemptedPhone,
-          )
-        check(pending.putIfAbsent(requestId, pendingRequest) == null)
-        try {
-          try {
-            transport.send(
-              nodeId = nodeId,
-              path = WearProtocol.REQUEST_PATH,
-              data =
-                WearProtocolCodec.encode(
-                  WearMessage.Request(requestId = requestId, method = method, params = params),
-                ),
-            )
-          } catch (error: Throwable) {
-            if (error is CancellationException) currentCoroutineContext().ensureActive()
-            invalidatePreferredPhone(attemptedPhone)
-            throw WearProxyException("phone_unavailable", "Paired phone is unavailable")
-          }
-          val envelope = response.await()
-          if (
-            (expectedNodeId == null || requirePreferredNode || method.requiresPreferredSnapshotSource()) &&
-            currentPreferredPhone()?.nodeId != nodeId
-          ) {
-            throw WearProxyException("phone_changed", "Preferred phone changed during request")
-          }
-          if (!envelope.ok) {
-            val error = envelope.error
-            throw WearProxyException(error?.code ?: "unavailable", error?.message ?: "Phone proxy request failed")
-          }
-          WearRpcResult(
-            payload = envelope.result ?: buildJsonObject {},
-            // Phone and watch can update independently. A missing v1 watermark means
-            // unknown, so the next event establishes the legacy phone's live baseline.
-            eventStreamId = envelope.eventStreamId,
-            eventSequence = envelope.eventSequence,
-            sourceNodeId = nodeId,
-          )
-        } finally {
-          pending.remove(requestId, pendingRequest)
+        requestBeforeDeadline(method, params, expectedNodeId, requirePreferredNode, route) { registration ->
+          attemptedPreferredPhone = registration
         }
       }
     if (result != null) return result
@@ -165,6 +123,76 @@ internal class WearProxyClient(
     // must be rediscovered just like a node that rejected the send outright.
     invalidatePreferredPhone(attemptedPreferredPhone)
     throw WearProxyException("timeout", "Paired phone did not respond")
+  }
+
+  private suspend fun requestBeforeDeadline(
+    method: WearRpcMethod,
+    params: JsonObject,
+    expectedNodeId: String?,
+    requirePreferredNode: Boolean,
+    route: WearProxyEnqueueGuard,
+    recordPreferredPhoneAttempt: (PreferredPhoneRegistration?) -> Unit,
+  ): WearRpcResult {
+    // Stateful RPCs stay on the phone that supplied their session/transcript.
+    // Rediscovery here could route a shared session key to a different phone.
+    val preferredPhone =
+      when {
+        requirePreferredNode || expectedNodeId == null -> resolvePreferredPhone()
+        else -> currentPreferredPhone()?.takeIf { it.nodeId == expectedNodeId }
+      }
+    val nodeId = expectedNodeId ?: checkNotNull(preferredPhone).nodeId
+    if (requirePreferredNode && expectedNodeId != null && preferredPhone?.nodeId != expectedNodeId) {
+      throw WearProxyException("phone_changed", "Preferred phone changed during request")
+    }
+    recordPreferredPhoneAttempt(preferredPhone?.takeIf { it.nodeId == nodeId })
+    val requestId = UUID.randomUUID().toString()
+    val response = CompletableDeferred<WearMessage.Response>()
+    val pendingRequest =
+      PendingWearRequest(
+        nodeId = nodeId,
+        response = response,
+        preferredPhone = preferredPhone?.takeIf { it.nodeId == nodeId },
+      )
+    check(pending.putIfAbsent(requestId, pendingRequest) == null)
+    return try {
+      try {
+        transport.sendGuarded(
+          nodeId = nodeId,
+          path = WearProtocol.REQUEST_PATH,
+          data =
+            WearProtocolCodec.encode(
+              WearMessage.Request(requestId = requestId, method = method, params = params),
+            ),
+          guard = route,
+        )
+      } catch (error: Throwable) {
+        if (error is CancellationException) currentCoroutineContext().ensureActive()
+        invalidatePreferredPhone(preferredPhone?.takeIf { it.nodeId == nodeId })
+        throw WearProxyException("phone_unavailable", "Paired phone is unavailable")
+      }
+      val envelope = response.await()
+      route {}
+      if (
+        (expectedNodeId == null || requirePreferredNode || method.requiresPreferredSnapshotSource()) &&
+        currentPreferredPhone()?.nodeId != nodeId
+      ) {
+        throw WearProxyException("phone_changed", "Preferred phone changed during request")
+      }
+      if (!envelope.ok) {
+        val error = envelope.error
+        throw WearProxyException(error?.code ?: "unavailable", error?.message ?: "Phone proxy request failed")
+      }
+      WearRpcResult(
+        payload = envelope.result ?: buildJsonObject {},
+        // Phone and watch can update independently. A missing v1 watermark means
+        // unknown, so the next event establishes the legacy phone's live baseline.
+        eventStreamId = envelope.eventStreamId,
+        eventSequence = envelope.eventSequence,
+        sourceNodeId = nodeId,
+      )
+    } finally {
+      pending.remove(requestId, pendingRequest)
+    }
   }
 
   suspend fun handleMessage(
@@ -305,11 +333,15 @@ internal class WearProxyClient(
   companion object {
     private const val MAX_BUFFERED_EVENTS = 64
 
-    fun create(context: Context): WearProxyClient {
+    fun create(
+      context: Context,
+      captureRoute: () -> WearProxyEnqueueGuard = { { it() } },
+    ): WearProxyClient {
       val appContext = context.applicationContext
       val capabilityClient = Wearable.getCapabilityClient(appContext)
       val messageClient = Wearable.getMessageClient(appContext)
       return WearProxyClient(
+        captureRoute = captureRoute,
         nodeResolver =
           WearNodeResolver {
             selectReachablePhoneNodeId(
@@ -321,8 +353,25 @@ internal class WearProxyClient(
             )
           },
         transport =
-          WearMessageTransport { nodeId, path, data ->
-            messageClient.sendMessage(nodeId, path, data).awaitWearTask()
+          object : WearMessageTransport {
+            override suspend fun send(
+              nodeId: String,
+              path: String,
+              data: ByteArray,
+            ) {
+              messageClient.sendMessage(nodeId, path, data).awaitWearTask()
+            }
+
+            override suspend fun sendGuarded(
+              nodeId: String,
+              path: String,
+              data: ByteArray,
+              guard: WearProxyEnqueueGuard,
+            ) {
+              var task: Task<Int>? = null
+              guard { task = messageClient.sendMessage(nodeId, path, data) }
+              checkNotNull(task).awaitWearTask()
+            }
           },
       )
     }

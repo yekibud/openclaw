@@ -19,7 +19,6 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.ActivityResultLauncher
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.activity.viewModels
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -106,7 +105,6 @@ internal fun shouldRecreateForScreenshotMode(
     (currentScene != null || parseWearScreenshotModeIntent(intent) != null)
 
 class MainActivity : ComponentActivity() {
-  private val viewModel: WearViewModel by viewModels()
   private var screenshotScene: WearScreenshotScene? = null
   private var launchState by mutableStateOf(WearLaunchState())
 
@@ -123,10 +121,8 @@ class MainActivity : ComponentActivity() {
     setContent {
       val scene = screenshotScene
       if (scene == null) {
-        OpenClawWearApp(
-          viewModel = viewModel,
-          settingsStore = remember { WearSettingsStore(applicationContext) },
-          speaker = remember { WearReplySpeaker(applicationContext) },
+        WearConnectionHost(
+          app = application as WearApplication,
           initialPage = launchState.initialTarget.initialPage,
           navigationRequest = launchState.navigationRequest,
           onMessageSubmitted = { launchState = launchState.navigate(WearLaunchTarget.Chat) },
@@ -174,6 +170,7 @@ internal fun OpenClawWearApp(
   navigationRequest: WearNavigationRequest? = null,
   onNavigationRequestHandled: (Int) -> Unit = {},
   onMessageSubmitted: () -> Unit = {},
+  onManageConnection: (() -> Unit)? = null,
 ) {
   val state by viewModel.state.collectAsState()
   val snapshot = state.toConversationSnapshot()
@@ -272,7 +269,7 @@ internal fun OpenClawWearApp(
       notificationsGranted = granted
     }
 
-  DisposableEffect(lifecycleOwner, view.context) {
+  DisposableEffect(lifecycleOwner, view.context, viewModel) {
     val observer =
       LifecycleEventObserver { _, event ->
         if (event == Lifecycle.Event.ON_RESUME) {
@@ -296,7 +293,10 @@ internal fun OpenClawWearApp(
         }
       }
     lifecycleOwner.lifecycle.addObserver(observer)
-    onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    onDispose {
+      lifecycleOwner.lifecycle.removeObserver(observer)
+      viewModel.suspendRealtimeTalk()
+    }
   }
 
   // Screen-off stops the activity, and ON_STOP suspends Talk; hold the screen while the mic is live.
@@ -515,6 +515,7 @@ internal fun OpenClawWearApp(
           }
         },
         onStopSpeaking = speaker::stop,
+        onManageConnection = onManageConnection,
       )
     }
   }

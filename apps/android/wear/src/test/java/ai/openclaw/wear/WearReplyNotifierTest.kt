@@ -6,6 +6,10 @@ import android.app.Notification
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.ComponentName
+import android.content.Context
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.serialization.json.Json
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotEquals
@@ -18,6 +22,7 @@ import org.robolectric.RobolectricTestRunner
 import org.robolectric.RuntimeEnvironment
 import org.robolectric.Shadows.shadowOf
 import org.robolectric.annotation.Config
+import java.util.UUID
 
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [34])
@@ -110,13 +115,23 @@ class WearReplyNotifierTest {
   @Config(application = WearApplication::class)
   fun visibilityTracksOverlappingActivityLifecycles() {
     val app = RuntimeEnvironment.getApplication() as WearApplication
-
-    app.onActivityStarted()
-    app.onActivityStarted()
-    app.onActivityStopped()
-    assertTrue(app.isActivityVisible())
-    app.onActivityStopped()
-    assertTrue(!app.isActivityVisible())
+    // Activity visibility now reaches the direct runtime; keep it off the encrypted store under Robolectric.
+    val runtimeField = WearApplication::class.java.getDeclaredField("directRuntime\$delegate").apply { isAccessible = true }
+    val previousRuntime = runtimeField.get(app)
+    val runtimeJob = SupervisorJob()
+    val store = WearGatewayStore(app.getSharedPreferences("notifier-visibility-${UUID.randomUUID()}", Context.MODE_PRIVATE))
+    runtimeField.set(app, lazyOf(WearDirectRuntime(app, CoroutineScope(runtimeJob + Dispatchers.Default), store)))
+    try {
+      app.onActivityStarted()
+      app.onActivityStarted()
+      app.onActivityStopped()
+      assertTrue(app.isActivityVisible())
+      app.onActivityStopped()
+      assertTrue(!app.isActivityVisible())
+    } finally {
+      runtimeJob.cancel()
+      runtimeField.set(app, previousRuntime)
+    }
   }
 
   @Test

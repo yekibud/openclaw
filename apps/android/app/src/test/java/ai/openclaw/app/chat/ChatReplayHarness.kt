@@ -2,6 +2,7 @@ package ai.openclaw.app.chat
 
 import ai.openclaw.app.gateway.GatewayLoadedImage
 import ai.openclaw.app.gateway.GatewaySession
+import ai.openclaw.app.gateway.syntheticGatewayRequestLease
 import androidx.room3.Room
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
@@ -52,7 +53,7 @@ internal fun CoroutineScope.createChatController(
     requestGatewayForGateway ?: { _, method, paramsJson -> requestGateway(method, paramsJson) }
   val settingsLease =
     captureRequestLease ?: { gatewayScope ->
-      GatewaySession.RequestLease(endpointStableId = gatewayScope?.gatewayId.orEmpty()) { method, paramsJson, _, withEnqueue ->
+      syntheticGatewayRequestLease(endpointStableId = gatewayScope?.gatewayId.orEmpty()) { method, paramsJson, _, withEnqueue ->
         withEnqueue {}
         if (gatewayScope == null) {
           requestGateway(method, paramsJson)
