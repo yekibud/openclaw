@@ -39,6 +39,7 @@ import android.net.Network
 import android.os.Build
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
@@ -50,6 +51,9 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 import java.util.UUID
+
+private const val LEASE_WAIT_ATTEMPTS = 10
+private const val LEASE_WAIT_STEP_MS = 400L
 
 internal val wearOperatorScopePolicy =
   GatewayOperatorScopePolicy(
@@ -999,7 +1003,29 @@ internal class WearDirectRuntime(
   }
 
   private fun send(attempt: WearDirectSend) {
-    val request = capture() ?: return
+    // Synchronous admission when a current lease exists keeps the established ordering; otherwise input
+    // returning from a system screen can beat the lease (or land mid-reconnect), so retry briefly before
+    // leaving the message parked for a manual Retry.
+    val request = capture()
+    if (request != null && sendWith(attempt, request)) return
+    scope.launch {
+      repeat(LEASE_WAIT_ATTEMPTS) { attemptIndex ->
+        delay(LEASE_WAIT_STEP_MS)
+        val stillPending = synchronized(lock) { mutableState.value.pendingSend === attempt && !mutableState.value.sending }
+        if (!stillPending) return@launch
+        val retry = capture()
+        if (retry != null && sendWith(attempt, retry)) return@launch
+        if (attemptIndex == 0) android.util.Log.w("WearDirect", "chat.send waiting: lease ready=${retry != null}")
+      }
+      android.util.Log.w("WearDirect", "chat.send parked: no current request lease")
+    }
+  }
+
+  /** Returns false when the route changed before the send was admitted, so the caller can retry. */
+  private fun sendWith(
+    attempt: WearDirectSend,
+    request: RequestContext,
+  ): Boolean {
     var admitted: Pair<Long, Long>? = null
     commit(request) {
       val state = mutableState.value
@@ -1008,7 +1034,7 @@ internal class WearDirectRuntime(
       mutableState.value = state.copy(sending = true, error = null)
       admitted = chatRevision to transcriptRevision
     }
-    val (revision, transcript) = admitted ?: return
+    val (revision, transcript) = admitted ?: return false
     scope.launch {
       val result =
         try {
@@ -1024,6 +1050,7 @@ internal class WearDirectRuntime(
             },
           )
         } catch (error: Exception) {
+          android.util.Log.w("WearDirect", "chat.send failed: ${error.javaClass.simpleName}: ${error.message}")
           commit(request) {
             val unknown = error !is GatewayRequestDefinitiveFailure
             mutableState.value =
@@ -1068,6 +1095,7 @@ internal class WearDirectRuntime(
         }
       }
     }
+    return true
   }
 
   fun abort() {

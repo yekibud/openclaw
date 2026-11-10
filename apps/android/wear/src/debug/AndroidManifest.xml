@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <application>
+        <!-- Debug builds only: adb-driven message delivery for the use-case harness (explicit component required). -->
+        <receiver
+            android:name=".WearE2eReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="ai.openclaw.wear.debug.SEND" />
+            </intent-filter>
+        </receiver>
+    </application>
+</manifest>
