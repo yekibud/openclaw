@@ -18,10 +18,14 @@ import android.os.Bundle
 import android.os.SystemClock
 import android.view.ViewTreeObserver
 import android.view.accessibility.AccessibilityNodeInfo.AccessibilityAction
+import android.widget.TextView
+import androidx.lifecycle.ViewModelProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import androidx.test.uiautomator.By
+import androidx.test.uiautomator.BySelector
 import androidx.test.uiautomator.Direction
+import androidx.test.uiautomator.StaleObjectException
 import androidx.test.uiautomator.UiDevice
 import androidx.test.uiautomator.UiObject2
 import androidx.test.uiautomator.Until
@@ -62,6 +66,12 @@ class WearChatFlowTest {
   private val instrumentation = InstrumentationRegistry.getInstrumentation()
   private val device = UiDevice.getInstance(instrumentation)
   private val failures = mutableListOf<String>()
+
+  private companion object {
+    /** Pixels per second; slow enough for a software-rendered emulator to register the whole drag. */
+    const val SLOW_SCROLL_SPEED = 900
+  }
+
   private val output by lazy {
     File(instrumentation.targetContext.getExternalFilesDir(null), "chat-flow").apply { mkdirs() }
   }
@@ -231,15 +241,18 @@ class WearChatFlowTest {
         checkUi("$terminal outcome survives refresh", device.hasObject(By.text(outcome)))
       }
       phone.emit("delta", runId = "stream-run", text = "Hello world")
-      awaitState("canonical stream UI") { device.hasObject(By.text("Hello world")) }
+      awaitState("canonical stream") { vm.state.value.activeRunId == "stream-run" && vm.state.value.streamText == "Hello world" }
+      awaitState("canonical stream UI") { reachable("Hello world") }
       capture("stream-01-world")
       phone.emit("delta", runId = "stream-run", text = "Hello")
-      awaitState("canonical stream shrinks") { device.hasObject(By.text("Hello")) && !device.hasObject(By.text("Hello world")) }
+      awaitState("canonical stream shrinks") { vm.state.value.streamText == "Hello" }
+      awaitState("canonical stream shrinks UI") { reachable("Hello") && !device.hasObject(By.text("Hello world")) }
       capture("stream-02-shrink")
       checkUi("ordered canonical replacement shrinks", device.hasObject(By.text("Hello")) && !device.hasObject(By.text("Hello world")))
       phone.emit("delta", runId = "stream-run", text = "")
+      awaitState("canonical stream clears") { vm.state.value.streamText == "" }
       scrollToTop()
-      awaitState("canonical stream clears") { !device.hasObject(By.text("Hello")) && device.hasObject(By.text("Start a conversation")) }
+      awaitState("canonical stream clears UI") { !device.hasObject(By.text("Hello")) && device.hasObject(By.text("Start a conversation")) }
       capture("stream-03-clear")
       checkUi("ordered canonical replacement clears", !device.hasObject(By.text("Hello")) && device.hasObject(By.text("Start a conversation")))
       File(output, "assertions.txt").writeText(if (failures.isEmpty()) "PASS\n" else failures.joinToString("\n"))
@@ -313,14 +326,51 @@ class WearChatFlowTest {
   }
 
   private fun reveal(text: String) {
-    repeat(100) {
-      val node = device.findObject(By.text(text))
-      if (node != null && node.visibleBounds.centerY() in device.displayHeight / 5..device.displayHeight * 4 / 5) return
-      // UiAutomator's scroll gesture stops before lifting, unlike a fling-producing swipe.
-      verticalList().scroll(Direction.DOWN, 0.3f)
+    val selector = By.text(text)
+    // Lazy lists compose only nearby items, and a 4 KB reader page is several thousand pixels tall on a
+    // large-font watch. UiAutomator's default 5000 px/s drag barely registers on a software-rendered
+    // emulator, so drag slowly (still lifting without a fling) until the node is composed.
+    if (device.findObject(selector) == null && !dragUntil(Direction.DOWN, selector)) dragUntil(Direction.UP, selector)
+    val band = device.displayHeight / 5..device.displayHeight * 4 / 5
+    repeat(60) {
+      val node = device.findObject(selector) ?: return@repeat
+      val centerY = node.visibleBounds.centerY()
+      if (centerY in band) return
+      verticalList().scroll(if (centerY > band.last) Direction.DOWN else Direction.UP, 0.2f, SLOW_SCROLL_SPEED)
     }
     capture("unreachable-$text")
-    assertTrue("Reachable $text", false)
+    assertTrue("Reachable $text", device.findObject(selector)?.visibleBounds?.centerY() in band)
+  }
+
+  /** Drags the list in [direction] until [selector] is composed or two consecutive drags change nothing. */
+  private fun dragUntil(
+    direction: Direction,
+    selector: BySelector,
+  ): Boolean {
+    var stuck = 0
+    repeat(80) {
+      if (device.hasObject(selector)) return true
+      val before = listSignature()
+      verticalList().scroll(direction, 0.6f, SLOW_SCROLL_SPEED)
+      val after = listSignature()
+      stuck = if (before != null && before == after) stuck + 1 else 0
+      if (stuck >= 2) return device.hasObject(selector)
+    }
+    return device.hasObject(selector)
+  }
+
+  /** Visible text and positions, or null when the list recomposed mid-read (which itself means it moved). */
+  private fun listSignature(): Int? =
+    try {
+      device.findObjects(By.clazz(TextView::class.java)).map { it.text to it.visibleBounds }.hashCode()
+    } catch (_: StaleObjectException) {
+      null
+    }
+
+  /** True when [text] is composed on screen now or after dragging the list either way to it. */
+  private fun reachable(text: String): Boolean {
+    val selector = By.text(text)
+    return device.hasObject(selector) || dragUntil(Direction.DOWN, selector) || dragUntil(Direction.UP, selector)
   }
 
   private fun clickAction(label: String) {
@@ -357,6 +407,7 @@ class WearChatFlowTest {
   ) {
     val deadline = SystemClock.elapsedRealtime() + 15_000
     while (!predicate() && SystemClock.elapsedRealtime() < deadline) SystemClock.sleep(50)
+    if (!predicate()) capture("failed-" + label.replace(' ', '-'))
     assertTrue(label, predicate())
     instrumentation.waitForIdleSync()
     SystemClock.sleep(300)
