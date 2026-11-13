@@ -25,6 +25,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.input.KeyboardType
@@ -70,7 +71,10 @@ internal fun WearConnectionHost(
   } else {
     OpenClawWearTheme(themeMode = remember { WearSettingsStore(app).read().themeMode }) {
       AppScaffold {
-        WearDirectContent(runtime, state, manage || state.connectionManagementRequired, onManage = { manage = it })
+        val talkRequestId =
+          navigationRequest?.takeIf { it.target == WearLaunchTarget.Voice }?.id
+            ?: INITIAL_TALK_REQUEST.takeIf { initialPage == WearHomePage.Voice }
+        WearDirectContent(runtime, state, manage || state.connectionManagementRequired, onManage = { manage = it }, talkRequestId = talkRequestId)
       }
     }
     navigationRequest?.let { request ->
@@ -85,6 +89,7 @@ private fun WearDirectContent(
   state: WearDirectState,
   manage: Boolean,
   onManage: (Boolean) -> Unit,
+  talkRequestId: Int? = null,
 ) {
   var page by remember { mutableStateOf("chat") }
   var review by remember { mutableStateOf<WearApproval?>(null) }
@@ -112,6 +117,71 @@ private fun WearDirectContent(
     onDispose { lifecycle.removeObserver(observer) }
   }
   val context = LocalContext.current
+  // Direct mode owns its own reply speaker: the phone-proxy UI's speaker and auto-speak never run here.
+  val settingsStore = remember { WearSettingsStore(context) }
+  val speaker = remember { WearReplySpeaker(context.applicationContext, settingsStore.read().voiceName) }
+  val availableVoices by speaker.availableVoices.collectAsState()
+  var voiceName by remember { mutableStateOf(settingsStore.read().voiceName) }
+  DisposableEffect(speaker) { onDispose { speaker.shutdown() } }
+  val speaking by speaker.isSpeaking.collectAsState()
+  var autoSpeak by remember { mutableStateOf(settingsStore.read().autoSpeak) }
+  var awaitingReplySince by remember { mutableStateOf<Long?>(null) }
+  val latestAssistant = state.messages.lastOrNull { it.role == "assistant" }
+  val latestAssistantKey = latestAssistant?.let { "${it.id}:${it.timestamp}:${it.text.hashCode()}" }
+  var seenAssistantKey by remember { mutableStateOf(latestAssistantKey) }
+  LaunchedEffect(latestAssistantKey) {
+    if (latestAssistantKey == seenAssistantKey) return@LaunchedEffect
+    seenAssistantKey = latestAssistantKey
+    val awaiting = awaitingReplySince != null
+    awaitingReplySince = null
+    if (!awaiting || latestAssistant == null || !lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)) return@LaunchedEffect
+    if (autoSpeak) speaker.speak(parseReplyNavigation(latestAssistant.text).text)
+  }
+  // Maps opens only for a navigation reply that arrives after the user's own send or while their Talk session runs
+  // (Talk consult answers reach the chat history, not the reply speaker). Markers already present are never replayed.
+  var solicitedSince by remember { mutableStateOf<Long?>(null) }
+  LaunchedEffect(state.talk.active) { if (state.talk.active) solicitedSince = System.currentTimeMillis() }
+  val navigationReply = state.messages.lastOrNull { it.role == "assistant" && parseReplyNavigation(it.text).destination != null }
+  val navigationKey = navigationReply?.let { "${it.id}:${it.timestamp}" }
+  var handledNavigationKey by remember { mutableStateOf(navigationKey) }
+  LaunchedEffect(navigationKey) {
+    if (navigationKey == null || navigationKey == handledNavigationKey) return@LaunchedEffect
+    handledNavigationKey = navigationKey
+    val since = solicitedSince ?: return@LaunchedEffect
+    val fresh =
+      System.currentTimeMillis() - since < SOLICITED_NAVIGATION_WINDOW_MS && (navigationReply.timestamp ?: 0L) >= since - CLOCK_SKEW_MS
+    val destination = parseReplyNavigation(navigationReply.text).destination
+    if (fresh && destination != null && lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)) {
+      solicitedSince = null
+      launchNavigation(context, destination)
+    }
+  }
+  // Greet once per Talk session as soon as it listens, so the user hears that it is on. The greeting is synthesized once
+  // (cached) and played through Talk's own voice-call output: system TTS is held back while Talk owns the audio. The mic
+  // is withheld from the model while it plays so the model does not answer the greeting.
+  val greetingText = remember { settingsStore.read().talkGreeting.trim() }
+  var greetingPcm by remember { mutableStateOf<ByteArray?>(null) }
+  LaunchedEffect(greetingText, voiceName) {
+    greetingPcm = if (greetingText.isEmpty()) null else WearTalkGreeting.pcm(context, greetingText, voiceName)
+  }
+  var greetedTalkAttempt by remember { mutableStateOf<String?>(null) }
+  LaunchedEffect(state.talk.attemptId, state.talk.status) {
+    val attemptId = state.talk.attemptId ?: return@LaunchedEffect
+    val ready = state.talk.status == WearRealtimeTalkStatus.LISTENING || state.talk.status == WearRealtimeTalkStatus.SPEAKING
+    if (!state.talk.active || !ready || attemptId == greetedTalkAttempt) return@LaunchedEffect
+    greetedTalkAttempt = attemptId
+    val pcm = greetingPcm ?: return@LaunchedEffect
+    runtime.talk.holdInput(WearTalkGreeting.durationMillis(pcm) + GREETING_HOLD_PAD_MS)
+    runtime.talk.playLocal(pcm)
+  }
+  // Hold the screen while a reply is pending or Talk runs: Wear's 15 s timeout is shorter than most agent turns, and a
+  // backgrounded app has its microphone silenced by the system.
+  val view = LocalView.current
+  val holdScreen = awaitingReplySince != null || state.sending || state.runId != null || state.talk.active || state.talkBusy
+  DisposableEffect(view, holdScreen) {
+    view.keepScreenOn = holdScreen
+    onDispose { view.keepScreenOn = false }
+  }
   val locationLauncher =
     rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { grants ->
       if (grants.values.any { it }) runtime.setLocationMode(LocationMode.WhileUsing)
@@ -120,6 +190,38 @@ private fun WearDirectContent(
     rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
       if (granted) runtime.startTalk()
     }
+  // Assistant button / Talk tile: start Talk as soon as the direct connection is ready, without a tap.
+  var handledTalkRequest by remember { mutableStateOf<Int?>(null) }
+  var talkWanted by remember { mutableStateOf(false) }
+  LaunchedEffect(talkRequestId) {
+    if (talkRequestId != null && talkRequestId != handledTalkRequest) {
+      handledTalkRequest = talkRequestId
+      talkWanted = true
+    }
+  }
+  LaunchedEffect(talkWanted) {
+    if (talkWanted) {
+      delay(AUTO_TALK_WAIT_MS)
+      talkWanted = false
+    }
+  }
+  DisposableEffect(view, talkWanted) {
+    if (talkWanted) view.keepScreenOn = true
+    onDispose { if (!holdScreen) view.keepScreenOn = false }
+  }
+  val lifecycleState by lifecycle.currentStateFlow.collectAsState()
+  val resumed = lifecycleState.isAtLeast(Lifecycle.State.RESUMED)
+  LaunchedEffect(talkWanted, resumed, state.connected, state.sessionKey, state.talkBusy, state.talk.active) {
+    if (!talkWanted) return@LaunchedEffect
+    if (state.talk.active) {
+      talkWanted = false
+    } else if (resumed && state.connected && state.sessionKey != null && !state.talkBusy) {
+      // A reconnect flips connected and reruns this effect, which then probes the fresh connection.
+      if (!runtime.probeConnection()) return@LaunchedEffect
+      talkWanted = false
+      if (context.hasPermission(Manifest.permission.RECORD_AUDIO)) runtime.startTalk() else microphoneLauncher.launch(Manifest.permission.RECORD_AUDIO)
+    }
+  }
   val messageLauncher =
     rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
       val message =
@@ -127,7 +229,13 @@ private fun WearDirectContent(
           ?.let(RemoteInput::getResultsFromIntent)
           ?.getCharSequence("message")
           ?.toString()
-      if (result.resultCode == Activity.RESULT_OK && message != null) inputOwner?.let { runtime.send(message, it) }
+      if (result.resultCode == Activity.RESULT_OK && message != null) {
+        inputOwner?.let {
+          awaitingReplySince = System.currentTimeMillis()
+          solicitedSince = awaitingReplySince
+          runtime.send(message, it)
+        }
+      }
       inputOwner = null
     }
 
@@ -179,10 +287,39 @@ private fun WearDirectContent(
   openReply?.let { reply ->
     val message = reply.message
     ReplyReader(
-      WearOpenReply(message = message, target = null, localText = message.text.takeIf { message.textTruncated == false }, supported = true),
+      WearOpenReply(message = message, target = null, localText = parseReplyNavigation(message.text).text.takeIf { message.textTruncated == false }, supported = true),
       readReply = reply.readPage,
       onDismiss = { openReply = null },
     )
+    return
+  }
+  // While Talk starts or runs, show only Talk: launched from the assistant button the user must see at a glance that it
+  // is listening, without scrolling the chat page.
+  if (!manage && page == "chat" && currentReview == null && (talkWanted || state.talk.active || state.talkBusy)) {
+    BackHandler {
+      talkWanted = false
+      runtime.stopTalk()
+    }
+    WearPage(pageLabel = stringResource(R.string.talk)) {
+      item { DirectText(if (state.talk.active || state.talk.statusText.isNotBlank()) state.talk.statusText else state.status) }
+      state.talk.conversation.takeLast(2).forEach { entry ->
+        item {
+          MessageBubble(
+            if (entry.role == WearRealtimeTalkRole.USER) WearChatRole.USER else WearChatRole.ASSISTANT,
+            entry.text,
+            truncated = entry.textTruncated,
+            streaming = entry.streaming,
+            onOpenReply = {},
+          )
+        }
+      }
+      item {
+        SecondaryButton(stringResource(R.string.watch_talk_stop), true) {
+          talkWanted = false
+          runtime.stopTalk()
+        }
+      }
+    }
     return
   }
   WearPage(pageLabel = title) {
@@ -245,6 +382,24 @@ private fun WearDirectContent(
         SecondaryButton(stringResource(R.string.watch_phone_proxy), !state.busy) {
           runtime.selectPhoneProxy()
           onManage(false)
+        }
+      }
+      item {
+        SecondaryButton(stringResource(R.string.auto_speak) + ": " + stringResource(if (autoSpeak) R.string.on else R.string.off), true) {
+          autoSpeak = !autoSpeak
+          settingsStore.writeAutoSpeak(autoSpeak)
+        }
+      }
+      // Cycle through the installed English voices (Indian English first); each tap speaks a sample in the new voice.
+      item {
+        val label = voiceName?.removePrefix("en-")?.replace("-x-", " ")?.replace("-", " ") ?: "default"
+        SecondaryButton("Voice: $label", availableVoices.isNotEmpty()) {
+          val index = availableVoices.indexOf(voiceName)
+          val next = if (index < 0 || index == availableVoices.lastIndex) availableVoices.firstOrNull() else availableVoices[index + 1]
+          voiceName = next
+          settingsStore.writeVoice(next)
+          speaker.setVoice(next)
+          speaker.speak("This is how I will read your replies.")
         }
       }
       val sharingLocation = state.locationMode != LocationMode.Off
@@ -351,11 +506,18 @@ private fun WearDirectContent(
         }
       }
       state.messages.forEach { message ->
-        item { MessageBubble(message.chatRole, message.text, truncated = message.textTruncated == true, onOpenReply = { openReply = runtime.openReply(message, state) }) }
+        item { MessageBubble(message.chatRole, parseReplyNavigation(message.text).text, truncated = message.textTruncated == true, onOpenReply = { openReply = runtime.openReply(message, state) }) }
       }
       state.streamText?.let { text -> item { StreamingBubble(text) } }
       state.pendingSend?.let { pending ->
         item { MessageBubble(WearChatRole.USER, pending.message, truncated = false, onOpenReply = {}) }
+      }
+      if (latestAssistant != null) {
+        item {
+          SecondaryButton(stringResource(if (speaking) R.string.stop_speaking else R.string.speak_reply), true) {
+            if (speaking) speaker.stop() else speaker.speak(parseReplyNavigation(latestAssistant.text).text)
+          }
+        }
       }
       item {
         SecondaryButton(messageLabel, state.connected && state.sessionKey != null && state.pendingSend == null && !state.sending && !state.sendUnknown) {
@@ -368,7 +530,12 @@ private fun WearDirectContent(
         item { DirectText(stringResource(if (state.sendUnknown) R.string.watch_message_unconfirmed else R.string.message_not_sent)) }
         item { SecondaryButton(stringResource(R.string.retry), state.connected, runtime::retrySend) }
         if (!state.sendUnknown) {
-          item { SecondaryButton(stringResource(R.string.watch_discard_message), true) { runtime.discardPendingSend(pending) } }
+          item {
+            SecondaryButton(stringResource(R.string.watch_discard_message), true) {
+              runtime.discardPendingSend(pending)
+              awaitingReplySince = null
+            }
+          }
         }
       }
       if (state.runId != null) item { SecondaryButton(stringResource(R.string.watch_stop), state.connected, runtime::abort) }
@@ -402,3 +569,9 @@ private fun decisionLabel(decision: String): String =
       else -> R.string.watch_deny
     },
   )
+
+private const val INITIAL_TALK_REQUEST = -1
+private const val AUTO_TALK_WAIT_MS = 45_000L
+private const val SOLICITED_NAVIGATION_WINDOW_MS = 5 * 60_000L
+private const val CLOCK_SKEW_MS = 30_000L
+private const val GREETING_HOLD_PAD_MS = 400L

@@ -13,10 +13,15 @@ import ai.openclaw.wear.shared.WearRealtimeTalkStatus
 import ai.openclaw.wear.shared.WearReplyText
 import android.annotation.SuppressLint
 import android.content.Context
+import android.content.pm.ApplicationInfo
+import android.media.AudioAttributes
+import android.media.AudioDeviceInfo
 import android.media.AudioFormat
+import android.media.AudioManager
 import android.media.AudioRecord
 import android.media.AudioTrack
 import android.media.MediaRecorder
+import android.media.audiofx.AcousticEchoCanceler
 import android.os.SystemClock
 import android.util.Base64
 import android.util.Log
@@ -101,6 +106,28 @@ internal class WearDirectTalkClient(
   private var audioFrames: Channel<ByteArray>? = null
   private var appendJob: Job? = null
   private var outputQueue: Channel<ByteArray?>? = null
+
+  private val audioManager: AudioManager? = context.getSystemService(AudioManager::class.java)
+
+  @Volatile private var lastActivityMillis = 0L
+
+  @Volatile private var inputHeldUntilMillis = 0L
+
+  /** Withholds microphone audio from the voice model (e.g. while the watch speaks its own greeting); 0 releases it. */
+  fun holdInput(millis: Long) {
+    inputHeldUntilMillis = if (millis <= 0) 0L else SystemClock.elapsedRealtime() + millis
+  }
+
+  private var echoCanceler: AcousticEchoCanceler? = null
+
+  private fun fullDuplex(): Boolean = headphonesConnected() || echoCanceler?.enabled == true
+
+  private val diagnostics = WearTalkDiagnostics(enabled = context.applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE != 0)
+
+  private fun headphonesConnected(): Boolean = audioManager?.getDevices(AudioManager.GET_DEVICES_OUTPUTS)?.any { it.type in HEADPHONE_OUTPUT_TYPES } == true
+
+  // Realtime providers send reply audio faster than real time; bound the backlog by playback length, not frame count.
+  private val queuedOutputBytes = AtomicLong(0)
   private var outputJob: Job? = null
   private var eventScope: CoroutineScope? = null
 
@@ -196,6 +223,7 @@ internal class WearDirectTalkClient(
               eventScope = CoroutineScope(scope.coroutineContext + SupervisorJob(scope.coroutineContext[Job]))
               startOutputLoop(attempt, created)
               startAppendLoop(attempt, created)
+              startIdleWatchdog(attempt, created)
               updateActiveState(DirectTalkState.Listening)
               true
             }
@@ -257,6 +285,7 @@ internal class WearDirectTalkClient(
         val attempt = activeAttempt ?: return
         attempt to currentSessionId
       }
+    diagnostics.event(obj["type"].asStringOrNull(), if (obj["type"].asStringOrNull() == "transcript") obj["text"].asStringOrNull() else null)
     when (obj["type"].asStringOrNull()) {
       "ready", "inputAudio" -> {
         updateActiveStateIfCurrent(attempt, currentSessionId, DirectTalkState.Listening)
@@ -277,6 +306,8 @@ internal class WearDirectTalkClient(
           fail(attempt, "Invalid Talk audio frame", currentSessionId)
           return
         }
+        diagnostics.received(bytes)
+        if (pcm16Rms(bytes) >= SPEECH_RMS_THRESHOLD) lastActivityMillis = SystemClock.elapsedRealtime()
         if (enqueueOutput(attempt, currentSessionId, bytes)) {
           updateActiveStateIfCurrent(attempt, currentSessionId, DirectTalkState.Speaking)
         }
@@ -354,7 +385,30 @@ internal class WearDirectTalkClient(
           else -> return
         }
       upsertConversation(role, text, final)
+      lastActivityMillis = SystemClock.elapsedRealtime()
+      if (role == WearRealtimeTalkRole.USER && final && isTalkStopPhrase(text)) {
+        scope.launch { stop() }
+        return
+      }
       if (role == WearRealtimeTalkRole.USER && final) updateActiveState(DirectTalkState.Thinking)
+    }
+  }
+
+  /** Ends Talk after TALK_IDLE_MILLIS with neither speech from the user nor reply audio (the session is otherwise open-ended). */
+  private fun startIdleWatchdog(
+    attempt: Attempt,
+    activeSessionId: String,
+  ) {
+    lastActivityMillis = SystemClock.elapsedRealtime()
+    eventScope?.launch {
+      while (isCurrent(attempt, activeSessionId)) {
+        delay(IDLE_CHECK_MILLIS)
+        if (isCurrent(attempt, activeSessionId) && SystemClock.elapsedRealtime() - lastActivityMillis > TALK_IDLE_MILLIS) {
+          diagnostics.note("idle timeout: ending Talk")
+          scope.launch { stop() }
+          break
+        }
+      }
     }
   }
 
@@ -362,13 +416,15 @@ internal class WearDirectTalkClient(
     attempt: Attempt,
     activeSessionId: String,
   ) {
-    val messages = Channel<ByteArray?>(capacity = OUTPUT_QUEUE_CAPACITY)
+    val messages = Channel<ByteArray?>(capacity = Channel.UNLIMITED)
     outputQueue?.close()
     outputQueue = messages
+    queuedOutputBytes.set(0)
     outputJob?.cancel()
     outputJob =
       scope.launch(Dispatchers.IO) {
         for (audio in messages) {
+          audio?.let { queuedOutputBytes.addAndGet(-it.size.toLong()) }
           if (!isCurrent(attempt, activeSessionId)) continue
           val written =
             try {
@@ -389,6 +445,19 @@ internal class WearDirectTalkClient(
       }
   }
 
+  /** Plays app-generated PCM16 mono at the realtime rate (e.g. the start greeting) through Talk's own output stream. */
+  fun playLocal(pcm: ByteArray): Boolean {
+    val (attempt, activeSessionId) =
+      synchronized(stateLock) { (activeAttempt ?: return false) to (sessionId ?: return false) }
+    var offset = 0
+    while (offset < pcm.size) {
+      val end = minOf(offset + LOCAL_FRAME_BYTES, pcm.size)
+      if (!enqueueOutput(attempt, activeSessionId, pcm.copyOfRange(offset, end))) return false
+      offset = end
+    }
+    return true
+  }
+
   private fun enqueueOutput(
     attempt: Attempt,
     activeSessionId: String,
@@ -397,7 +466,9 @@ internal class WearDirectTalkClient(
     val accepted =
       synchronized(stateLock) {
         if (!isCurrent(attempt, activeSessionId)) return false
-        outputQueue?.trySend(audio)?.isSuccess == true
+        val size = audio?.size?.toLong() ?: 0L
+        if (queuedOutputBytes.get() + size > OUTPUT_BACKLOG_BYTE_CAPACITY) return@synchronized false
+        (outputQueue?.trySend(audio)?.isSuccess == true).also { if (it) queuedOutputBytes.addAndGet(size) }
       }
     if (!accepted) fail(attempt, "Talk audio queue overflowed", activeSessionId)
     return accepted
@@ -415,7 +486,12 @@ internal class WearDirectTalkClient(
     appendJob =
       scope.launch {
         for (frame in frames) {
-          if (!isCurrent(attempt, activeSessionId) || _snapshot.value.speaking) continue
+          // Half duplex drops the user's audio while the reply plays; full duplex (echo canceller or headphones)
+          // keeps sending it, because realtime voice models start replying early and must hear the rest.
+          if (!isCurrent(attempt, activeSessionId) || (_snapshot.value.speaking && !fullDuplex())) continue
+          if (SystemClock.elapsedRealtime() < inputHeldUntilMillis) continue
+          diagnostics.sent(frame)
+          if (pcm16Rms(frame) >= SPEECH_RMS_THRESHOLD) lastActivityMillis = SystemClock.elapsedRealtime()
           val params =
             buildJsonObject {
               put("sessionId", JsonPrimitive(activeSessionId))
@@ -448,12 +524,20 @@ internal class WearDirectTalkClient(
     val recorder =
       AudioRecord
         .Builder()
-        .setAudioSource(MediaRecorder.AudioSource.VOICE_RECOGNITION)
+        // Voice-call capture gets the platform's acoustic echo cancellation against our voice-call playback.
+        .setAudioSource(MediaRecorder.AudioSource.VOICE_COMMUNICATION)
         .setAudioFormat(audioFormat(AudioFormat.CHANNEL_IN_MONO))
         .setBufferSizeInBytes(maxOf(minimumBuffer * 2, frameBytes * 4))
         .build()
     audioRecord = recorder
     check(recorder.state == AudioRecord.STATE_INITIALIZED)
+    echoCanceler =
+      if (AcousticEchoCanceler.isAvailable()) {
+        runCatching { AcousticEchoCanceler.create(recorder.audioSessionId)?.apply { enabled = true } }.getOrNull()
+      } else {
+        null
+      }
+    diagnostics.note("capture source=voice_communication aec=${echoCanceler?.enabled == true} headphones=${headphonesConnected()}")
     recorder.startRecording()
     // Native start failure can return normally while the recorder remains stopped.
     check(recorder.recordingState == AudioRecord.RECORDSTATE_RECORDING)
@@ -498,7 +582,9 @@ internal class WearDirectTalkClient(
     synchronized(audioLock) {
       if (!isCurrent(attempt, activeSessionId)) return false
       if (!_isPlaying.value) {
-        pauseCaptureLocked()
+        // Half duplex on the watch speaker (it would echo into the mic). Headphones carry no echo, so keep listening:
+        // realtime voice models expect continuous audio and otherwise lose the rest of a sentence spoken over their reply.
+        if (!fullDuplex()) pauseCaptureLocked()
         check(audioFocus.request())
       }
       val mouthLevels = mouthLevelAccumulator.append(bytes)
@@ -552,7 +638,7 @@ internal class WearDirectTalkClient(
     require(minimumBuffer > 0)
     return AudioTrack
       .Builder()
-      .setAudioAttributes(wearSpeechAudioAttributes)
+      .setAudioAttributes(TALK_PLAYBACK_ATTRIBUTES)
       .setAudioFormat(audioFormat(AudioFormat.CHANNEL_OUT_MONO))
       .setTransferMode(AudioTrack.MODE_STREAM)
       .setBufferSizeInBytes(maxOf(minimumBuffer * 2, frameBytes * 4))
@@ -646,6 +732,8 @@ internal class WearDirectTalkClient(
     captureJob = null
     val recorder = audioRecord
     audioRecord = null
+    runCatching { echoCanceler?.release() }
+    echoCanceler = null
     runCatching { recorder?.stop() }
     runCatching { recorder?.release() }
   }
@@ -790,7 +878,30 @@ internal class WearDirectTalkClient(
     const val MAX_CONVERSATION_ENTRIES = 20
     const val MAX_STATUS_LENGTH = 160
     const val INPUT_QUEUE_CAPACITY = 64
-    const val OUTPUT_QUEUE_CAPACITY = 64
+
+    // 24 kHz mono PCM16 is 48 kB per second: about 90 seconds of reply audio may wait for the speaker.
+    const val OUTPUT_BACKLOG_BYTE_CAPACITY = 48_000L * 90
+    const val TALK_IDLE_MILLIS = 45_000L
+    const val LOCAL_FRAME_BYTES = 4_800
+    const val IDLE_CHECK_MILLIS = 5_000L
+
+    // Quiet room noise on the watch mic sits well below this; normal speech is several times higher.
+    const val SPEECH_RMS_THRESHOLD = 600.0
+    val TALK_PLAYBACK_ATTRIBUTES: AudioAttributes =
+      AudioAttributes
+        .Builder()
+        .setUsage(AudioAttributes.USAGE_VOICE_COMMUNICATION)
+        .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+        .build()
+    val HEADPHONE_OUTPUT_TYPES =
+      setOf(
+        AudioDeviceInfo.TYPE_BLUETOOTH_A2DP,
+        AudioDeviceInfo.TYPE_BLUETOOTH_SCO,
+        AudioDeviceInfo.TYPE_BLE_HEADSET,
+        AudioDeviceInfo.TYPE_WIRED_HEADSET,
+        AudioDeviceInfo.TYPE_WIRED_HEADPHONES,
+        AudioDeviceInfo.TYPE_USB_HEADSET,
+      )
     const val OUTPUT_QUEUE_BYTE_CAPACITY = WearProtocol.MAX_REALTIME_AUDIO_FRAME_BYTES * 128
     const val OUTPUT_QUEUE_BASE64_CHAR_CAPACITY = (OUTPUT_QUEUE_BYTE_CAPACITY + 2) / 3 * 4
     const val SESSION_CREATE_TIMEOUT_MILLIS = 15_000L

@@ -14,6 +14,7 @@ import java.util.UUID
 
 internal class WearReplySpeaker(
   context: Context,
+  voiceName: String? = null,
 ) {
   // TTS can wait for its initialization lock or Binder. Keep its entire lifecycle
   // and callbacks on one queue; UI callers never acquire a lock held by the engine.
@@ -23,6 +24,11 @@ internal class WearReplySpeaker(
   val isSpeaking: StateFlow<Boolean> = _isSpeaking.asStateFlow()
   private val _failed = MutableStateFlow(false)
   val failed: StateFlow<Boolean> = _failed.asStateFlow()
+
+  /** Installed English voices (Indian English first), by engine voice name. Empty until the engine is ready. */
+  private val _availableVoices = MutableStateFlow<List<String>>(emptyList())
+  val availableVoices: StateFlow<List<String>> = _availableVoices.asStateFlow()
+  private var preferredVoice: String? = voiceName
   private val audioFocus = WearAudioFocusController(context, ::stop)
 
   private var engine: TextToSpeech? = null
@@ -80,7 +86,33 @@ internal class WearReplySpeaker(
     val currentEngine = engine ?: return
     currentEngine.language = Locale.getDefault()
     currentEngine.setAudioAttributes(wearSpeechAudioAttributes)
+    val all = runCatching { currentEngine.voices.orEmpty() }.getOrDefault(emptySet()).filter { it.locale.language == "en" }
+    // Network voices are fine on a watch with LTE; voices whose data is not installed cannot be selected here.
+    // Google TTS flags whole language packs as not installed, but its network voices still synthesize without the
+    // pack (the engine accepted them), so keep network voices; drop only local voices whose data is missing.
+    val voices =
+      all
+        .filter { it.isNetworkConnectionRequired || !it.features.contains(TextToSpeech.Engine.KEY_FEATURE_NOT_INSTALLED) }
+        .sortedWith(compareBy({ it.locale.country != "IN" }, { it.isNetworkConnectionRequired }, { it.locale.toLanguageTag() }, { it.name }))
+    _availableVoices.value = voices.map { it.name }
+    applyPreferredVoice()
     pendingText?.let(::speakReady)
+  }
+
+  private fun applyPreferredVoice() {
+    val currentEngine = engine ?: return
+    val wanted = preferredVoice ?: return
+    val voice = runCatching { currentEngine.voices.orEmpty() }.getOrDefault(emptySet()).firstOrNull { it.name == wanted } ?: return
+    currentEngine.setVoice(voice)
+  }
+
+  /** Switch the reading voice by engine voice name (null = engine default); takes effect on the next utterance. */
+  fun setVoice(name: String?) {
+    handler.post {
+      if (closed) return@post
+      preferredVoice = name
+      if (name == null) engine?.language = Locale.getDefault() else applyPreferredVoice()
+    }
   }
 
   fun speak(text: String) {

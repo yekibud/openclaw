@@ -13,6 +13,7 @@ import ai.openclaw.app.gateway.GatewayOperatorScopePolicy
 import ai.openclaw.app.gateway.GatewayRegistryEntry
 import ai.openclaw.app.gateway.GatewayRequestDefinitiveFailure
 import ai.openclaw.app.gateway.GatewayRequestNotEnqueued
+import ai.openclaw.app.gateway.GatewayRequestRejected
 import ai.openclaw.app.gateway.GatewaySession
 import ai.openclaw.app.gateway.GatewayTlsParams
 import ai.openclaw.app.gateway.GatewayTlsProbeRunner
@@ -34,9 +35,12 @@ import ai.openclaw.wear.shared.wearReplyIsTruncated
 import ai.openclaw.wear.shared.wearReplyText
 import android.Manifest
 import android.content.Context
+import android.content.pm.ApplicationInfo
 import android.net.ConnectivityManager
 import android.net.Network
+import android.net.NetworkCapabilities
 import android.os.Build
+import android.util.Log
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.delay
@@ -52,8 +56,10 @@ import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 import java.util.UUID
 
-private const val LEASE_WAIT_ATTEMPTS = 10
-private const val LEASE_WAIT_STEP_MS = 400L
+// A real watch coming back from the system voice screen reconnects through the public endpoint; that takes
+// longer than a few seconds, so keep retrying for 30 s before parking the message for a manual Retry.
+private const val LEASE_WAIT_ATTEMPTS = 60
+private const val LEASE_WAIT_STEP_MS = 500L
 
 internal val wearOperatorScopePolicy =
   GatewayOperatorScopePolicy(
@@ -190,18 +196,99 @@ internal class WearDirectRuntime(
       isConnected = { state.value.connected },
       requestGateway = ::talkRequest,
       sendGatewayFrame = ::talkFrame,
-      onSnapshot = { snapshot -> synchronized(lock) { mutableState.value = mutableState.value.copy(talk = snapshot) } },
+      onSnapshot = { snapshot ->
+        val wasActive =
+          synchronized(lock) {
+            mutableState.value.talk.active
+              .also { mutableState.value = mutableState.value.copy(talk = snapshot) }
+          }
+        if (snapshot.active && !wasActive) WearTalkForegroundService.start(context)
+        if (!snapshot.active && wasActive) WearTalkForegroundService.stop(context)
+      },
       onAudioState = { capturing, playing ->
         synchronized(lock) { mutableState.value = mutableState.value.copy(talkCapturing = capturing, talkPlaying = playing) }
       },
     )
 
   private val connectivity = context.getSystemService(ConnectivityManager::class.java)
+  private val diagnosticsEnabled = context.applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE != 0
+
+  /** Debug builds only: connection lifecycle with reasons, to tell network loss from Gateway closes. */
+  private fun connectionLog(message: String) {
+    if (diagnosticsEnabled) Log.i("WearConnDiag", message)
+  }
+
   private val networkCallback =
     object : ConnectivityManager.NetworkCallback() {
       override fun onAvailable(network: Network) {
+        connectionLog("network available $network")
         val current = synchronized(lock) { owner.takeIf { visible && !stopped } }
         current?.session?.retryAfterNetworkRestore()
+      }
+
+      override fun onLost(network: Network) = connectionLog("network lost $network")
+
+      override fun onCapabilitiesChanged(
+        network: Network,
+        capabilities: NetworkCapabilities,
+      ) {
+        val transport =
+          when {
+            capabilities.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) -> "wifi"
+            capabilities.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) -> "cellular"
+            capabilities.hasTransport(NetworkCapabilities.TRANSPORT_BLUETOOTH) -> "bluetooth"
+            else -> "other"
+          }
+        val validated = capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)
+        val key = "$network:$transport:$validated"
+        if (key != lastNetworkKey) {
+          lastNetworkKey = key
+          connectionLog("default network $network transport=$transport validated=$validated")
+        }
+        if (validated) moveToDefaultNetwork(network)
+      }
+    }
+
+  // A socket stays on the network it was opened on. Wear wakes on LTE and brings Wi-Fi back seconds later, then
+  // tears LTE data down ~30 s after that ("Software caused connection abort"), which kills Talk mid-session; so
+  // when a different validated network becomes the default, move the connection onto it right away.
+  @Volatile private var socketNetwork: Network? = null
+
+  private fun moveToDefaultNetwork(network: Network) {
+    val previous = socketNetwork
+    socketNetwork = network
+    if (previous == null || previous == network) return
+    val (session, nodeSession) = synchronized(lock) { owner?.session.takeIf { visible && !stopped } to nodeOwner?.session }
+    if (session == null) return
+    connectionLog("default network changed $previous -> $network: reconnecting")
+    session.reconnect()
+    nodeSession?.reconnect()
+  }
+
+  @Volatile private var lastNetworkKey: String? = null
+
+  /** Debug builds: incoming Gateway events per second, to see whether the receive path is flowing or stuck. */
+  private val eventCounter =
+    object {
+      private var windowStart = android.os.SystemClock.elapsedRealtime()
+      private val counts = mutableMapOf<String, Int>()
+      private var bytes = 0L
+
+      @Synchronized
+      fun record(
+        event: String,
+        size: Int,
+      ) {
+        if (!diagnosticsEnabled) return
+        counts.merge(event, 1, Int::plus)
+        bytes += size
+        val now = android.os.SystemClock.elapsedRealtime()
+        if (now - windowStart >= 1_000) {
+          connectionLog("events $counts bytes=$bytes")
+          windowStart = now
+          counts.clear()
+          bytes = 0
+        }
       }
     }
 
@@ -241,6 +328,7 @@ internal class WearDirectRuntime(
       if (visible == value) return
       visible = value
     }
+    connectionLog("visible=$value")
     if (value) {
       connectivity.registerDefaultNetworkCallback(networkCallback)
       if (!stopped && state.value.selected != null) reconnect()
@@ -422,6 +510,8 @@ internal class WearDirectRuntime(
     acceptedFingerprint: String? = null,
   ) {
     if (!current(intent) || !visible || stopped) return
+    connectionLog("connect ${endpoint.host}:${endpoint.port}")
+    socketNetwork = connectivity.activeNetwork
     publish(intent) { copy(status = "Connecting") }
     var fingerprint = acceptedFingerprint
     if (endpoint.tlsEnabled && fingerprint == null) {
@@ -459,8 +549,13 @@ internal class WearDirectRuntime(
         scope = scope,
         identityStore = identity,
         deviceAuthStore = tokens,
-        onConnected = { hello -> connected(intent, endpoint, hello) },
-        onDisconnected = {
+        onConnected = { hello ->
+          connectionLog("connected")
+          connected(intent, endpoint, hello)
+        },
+        onDisconnected = { message ->
+          connectionLog("disconnected: $message")
+          socketNetwork = connectivity.activeNetwork // the retry opens its socket on the current default
           // The closed physical lease cannot commit its send failure, so settle the visible attempt here.
           publish(intent) {
             copy(
@@ -473,6 +568,7 @@ internal class WearDirectRuntime(
           }
         },
         onConnectFailure = { error, _ ->
+          connectionLog("connect failed: code=${error.details?.code} ${error.message}")
           publish(intent) {
             copy(
               error =
@@ -721,6 +817,26 @@ internal class WearDirectRuntime(
     return Json.parseToJsonElement(raw) as? JsonObject ?: error("Invalid Gateway result")
   }
 
+  /**
+   * True when the Gateway answers a tiny request quickly. A socket left open while the app was in the background can
+   * be silently dead (Android cuts background network); then this forces a reconnect and returns false, and the caller
+   * retries once the fresh connection reports connected.
+   */
+  suspend fun probeConnection(): Boolean =
+    try {
+      talkRequest("health", "{}", LIVENESS_TIMEOUT_MS)
+      true
+    } catch (err: CancellationException) {
+      throw err
+    } catch (_: GatewayRequestRejected) {
+      true // the Gateway answered (e.g. scope denied), so the connection is alive
+    } catch (_: Throwable) {
+      connectionLog("liveness probe failed: reconnecting")
+      val session = synchronized(lock) { owner?.session }
+      session?.reconnect()
+      false
+    }
+
   fun startTalk() {
     val sessionKey = state.value.sessionKey ?: return
     if (!state.value.connected || state.value.talkBusy) return
@@ -753,11 +869,19 @@ internal class WearDirectRuntime(
     timeoutMs: Long,
   ): String {
     val request = capture() ?: throw GatewayRequestNotEnqueued("Watch is not connected")
-    return request.lease.request(method, paramsJson, timeoutMs) { enqueue ->
-      synchronized(lock) {
-        if (!requestCurrent(request)) throw GatewayRequestNotEnqueued("Watch route changed")
-        enqueue()
-      }
+    val started = android.os.SystemClock.elapsedRealtime()
+    connectionLog("req $method")
+    return try {
+      request.lease
+        .request(method, paramsJson, timeoutMs) { enqueue ->
+          synchronized(lock) {
+            if (!requestCurrent(request)) throw GatewayRequestNotEnqueued("Watch route changed")
+            enqueue()
+          }
+        }.also { connectionLog("res $method ${android.os.SystemClock.elapsedRealtime() - started}ms") }
+    } catch (err: Throwable) {
+      connectionLog("err $method ${android.os.SystemClock.elapsedRealtime() - started}ms ${err::class.java.simpleName}: ${err.message}")
+      throw err
     }
   }
 
@@ -976,7 +1100,7 @@ internal class WearDirectRuntime(
     message: String,
     input: WearInputOwner,
   ) {
-    val text = message.trim().takeIf { it.isNotEmpty() && it.length <= 4000 } ?: return
+    val text = applySpokenDirectives(message.trim()).takeIf { it.isNotEmpty() && it.length <= 4000 } ?: return
     val attempt =
       synchronized(lock) {
         val state = mutableState.value
@@ -1223,7 +1347,11 @@ internal class WearDirectRuntime(
     payload: String?,
   ) {
     if (!current(intent)) return
+    eventCounter.record(event, payload?.length ?: 0)
+    val handlerStart = android.os.SystemClock.elapsedRealtime()
     if (event == "talk.event" || event == "chat") talk.handleGatewayEvent(event, payload)
+    val handlerMillis = android.os.SystemClock.elapsedRealtime() - handlerStart
+    if (handlerMillis > SLOW_EVENT_HANDLER_MS) connectionLog("slow handler $event ${handlerMillis}ms")
     if (event == "seqGap") {
       synchronized(lock) {
         feed.begin()
@@ -1317,3 +1445,6 @@ internal fun directChatMessage(value: kotlinx.serialization.json.JsonElement?): 
     textTruncated = preview != text || wearReplyIsTruncated(obj, 2000),
   )
 }
+
+private const val SLOW_EVENT_HANDLER_MS = 100L
+private const val LIVENESS_TIMEOUT_MS = 3_000L

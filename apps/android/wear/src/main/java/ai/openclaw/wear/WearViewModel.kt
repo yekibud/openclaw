@@ -649,7 +649,7 @@ internal class WearViewModel(
     val current = mutableState.value
     val session = current.selectedSession ?: return false
     val routeGeneration = phoneRouteGeneration
-    val normalized = text.trim()
+    val normalized = applySpokenDirectives(text.trim())
     if (normalized.isEmpty() || !current.canSubmitReply) return false
     val attempt =
       current.pendingReply?.let { pending ->

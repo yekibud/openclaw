@@ -300,9 +300,12 @@ internal fun OpenClawWearApp(
   }
 
   // Screen-off stops the activity, and ON_STOP suspends Talk; hold the screen while the mic is live.
+  // Also hold it while a reply is pending: the 15 s Wear screen timeout is shorter than most agent turns, and a
+  // stopped activity would neither show nor speak the answer.
   val realtimeLive = state.realtimeTalk.active || state.realtimeCapturing
-  DisposableEffect(view, realtimeLive) {
-    view.keepScreenOn = realtimeLive
+  val awaitingReply = awaitingReplySessionId != null
+  DisposableEffect(view, realtimeLive, awaitingReply) {
+    view.keepScreenOn = realtimeLive || awaitingReply
     onDispose { view.keepScreenOn = false }
   }
 
@@ -347,7 +350,8 @@ internal fun OpenClawWearApp(
     interaction = WearInteractionState.READY
     if (reply != null) {
       view.performHapticFeedback(HapticFeedbackConstants.CONFIRM)
-      if (autoSpeak && lifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)) speaker.speak(reply.text)
+      // STARTED rather than RESUMED: a reply can land while the screen is dimming, which pauses the activity first.
+      if (autoSpeak && lifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)) speaker.speak(reply.text)
     }
   }
 

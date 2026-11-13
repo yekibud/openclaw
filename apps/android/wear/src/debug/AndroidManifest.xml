@@ -7,6 +7,12 @@
             android:exported="true">
             <intent-filter>
                 <action android:name="ai.openclaw.wear.debug.SEND" />
+                <action android:name="ai.openclaw.wear.debug.SETUP" />
+                <action android:name="ai.openclaw.wear.debug.DUMP" />
+                <action android:name="ai.openclaw.wear.debug.AUTO_SPEAK" />
+                <action android:name="ai.openclaw.wear.debug.SET_VOICE" />
+                <action android:name="ai.openclaw.wear.debug.SPEAK" />
+                <action android:name="ai.openclaw.wear.debug.SET_GREETING" />
             </intent-filter>
         </receiver>
     </application>

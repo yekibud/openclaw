@@ -26,7 +26,12 @@ internal enum class WearThemeMode(
 internal data class WearSettings(
   val themeMode: WearThemeMode,
   val autoSpeak: Boolean,
+  val voiceName: String? = null,
+  /** Spoken by the watch when Talk starts listening, so the user knows it is on; empty = no greeting. */
+  val talkGreeting: String = DEFAULT_TALK_GREETING,
 )
+
+internal const val DEFAULT_TALK_GREETING = "Hey, what's up?"
 
 internal class WearSettingsStore internal constructor(
   private val preferences: SharedPreferences,
@@ -43,6 +48,8 @@ internal class WearSettingsStore internal constructor(
     WearSettings(
       themeMode = WearThemeMode.fromRawValue(preferences.getString(THEME_MODE_KEY, null)),
       autoSpeak = preferences.getBoolean(AUTO_SPEAK_KEY, DEFAULT_AUTO_SPEAK),
+      voiceName = preferences.getString(VOICE_KEY, null)?.takeIf { it.isNotBlank() },
+      talkGreeting = preferences.getString(TALK_GREETING_KEY, null) ?: DEFAULT_TALK_GREETING,
     )
 
   fun writeThemeMode(mode: WearThemeMode) {
@@ -57,6 +64,18 @@ internal class WearSettingsStore internal constructor(
     }
   }
 
+  fun writeVoice(name: String?) {
+    preferences.edit {
+      if (name.isNullOrBlank()) remove(VOICE_KEY) else putString(VOICE_KEY, name)
+    }
+  }
+
+  fun writeTalkGreeting(text: String?) {
+    preferences.edit {
+      if (text == null) remove(TALK_GREETING_KEY) else putString(TALK_GREETING_KEY, text.trim())
+    }
+  }
+
   private companion object {
     // One Watch-owned store is the durable owner for local UI preferences. These
     // keys have not shipped in a tagged release, so defaults are the only upgrade path.
@@ -64,6 +83,8 @@ internal class WearSettingsStore internal constructor(
     const val PREFERENCES_NAME = "openclaw.wear.settings"
     const val THEME_MODE_KEY = "appearance.themeMode"
     const val AUTO_SPEAK_KEY = "conversation.autoSpeak"
+    const val VOICE_KEY = "conversation.voice"
+    const val TALK_GREETING_KEY = "conversation.talkGreeting"
   }
 }
 
