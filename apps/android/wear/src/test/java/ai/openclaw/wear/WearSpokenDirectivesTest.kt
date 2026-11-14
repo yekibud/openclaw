@@ -49,6 +49,8 @@ class WearTalkStopPhraseTest {
       "please stop the conversation",
       "Go away.",
       "OK, go away",
+      "That will be all.",
+      "Thanks, that will be all",
     ).forEach { org.junit.Assert.assertTrue(it, isTalkStopPhrase(it)) }
   }
 
@@ -66,6 +68,7 @@ class WearTalkStopPhraseTest {
       "I don't want to talk to Bob today, move that meeting",
       "Remind me to stop by the conversation pit tomorrow",
       "Should I go away for the weekend?",
+      "That will be all the groceries for this week?",
     ).forEach { org.junit.Assert.assertFalse(it, isTalkStopPhrase(it)) }
   }
 }
