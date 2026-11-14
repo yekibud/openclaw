@@ -22,9 +22,9 @@ private val TALK_STOP_PATTERNS =
     """\bstop(?: (?:now|again|it|that|there|please|already|talking(?: to me)?|listening))*$CLAUSE_END""",
     """\b(?:turn|switch|shut) (?:it |this |talk |yourself )?(?:off|down)$CLAUSE_END""",
     """\b(?:i )?(?:don't|do not) want to talk(?: anymore| now| to you| any more)?$CLAUSE_END""",
-    """\b(?:be quiet|shut up|that's enough|enough for now|leave me alone)$CLAUSE_END""",
+    """\b(?:be quiet|shut up|go away|that's enough|that'll be all|enough for now|leave me alone)$CLAUSE_END""",
     """\b(?:we're|we are|i'm|i am) (?:all )?(?:done|finished)(?: now| here| talking| for now)?$CLAUSE_END""",
-    """\b(?:end|exit|close|quit|finish) (?:the |this |our )?(?:talk|conversation|chat|session|call)\b""",
+    """\b(?:end|exit|close|quit|finish|stop) (?:the |this |our )?(?:talk|conversation|chat|session|call)\b""",
     """\bhang up\b""",
     """\b(?:good ?bye|bye(?: bye)?|good night|that's (?:all|it)(?: for now)?)\W*$""",
   ).map { Regex(it, RegexOption.IGNORE_CASE) }

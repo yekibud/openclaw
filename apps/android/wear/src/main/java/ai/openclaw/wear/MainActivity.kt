@@ -144,6 +144,7 @@ class MainActivity : ComponentActivity() {
       return
     }
     launchState = launchState.next(intent)
+    if (screenshotScene == null) (application as WearApplication).directRuntime.wakeConnection()
   }
 
   override fun onStart() {

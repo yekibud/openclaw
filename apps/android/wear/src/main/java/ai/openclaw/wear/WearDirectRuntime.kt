@@ -324,9 +324,13 @@ internal class WearDirectRuntime(
   }
 
   fun setVisible(value: Boolean) {
-    synchronized(lock) {
-      if (visible == value) return
-      visible = value
+    val changed =
+      synchronized(lock) {
+        (visible != value).also { visible = value }
+      }
+    if (!changed) {
+      if (value) wakeConnection()
+      return
     }
     connectionLog("visible=$value")
     if (value) {
@@ -435,6 +439,19 @@ internal class WearDirectRuntime(
     invalidateInput()
     stopped = true
     changeIntent { publish(it) { copy(status = "Disconnected") } }
+  }
+
+  /**
+   * The user just opened or long-pressed into the app. The runtime may still count as visible (the hide grace outlives a
+   * screen-off) while its socket died with the background network and the loop sits in a multi-second backoff; skip
+   * that wait so Talk does not start late.
+   */
+  fun wakeConnection() {
+    if (stopped || state.value.connected) return
+    val session = synchronized(lock) { owner?.session } ?: return
+    connectionLog("woken while disconnected: skipping backoff")
+    // Unlike reconnect(), this leaves a handshake that is already under way alone.
+    session.retryAfterNetworkRestore()
   }
 
   fun reconnect() {

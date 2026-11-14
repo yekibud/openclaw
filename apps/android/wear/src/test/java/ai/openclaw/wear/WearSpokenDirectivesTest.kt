@@ -45,6 +45,10 @@ class WearTalkStopPhraseTest {
       "please turn it off",
       "I don't want to talk anymore.",
       "Okay, that's enough",
+      "Stop conversation",
+      "please stop the conversation",
+      "Go away.",
+      "OK, go away",
     ).forEach { org.junit.Assert.assertTrue(it, isTalkStopPhrase(it)) }
   }
 
@@ -60,6 +64,8 @@ class WearTalkStopPhraseTest {
       "Turn off the porch light reminder",
       "Remind me to shut down the server tonight",
       "I don't want to talk to Bob today, move that meeting",
+      "Remind me to stop by the conversation pit tomorrow",
+      "Should I go away for the weekend?",
     ).forEach { org.junit.Assert.assertFalse(it, isTalkStopPhrase(it)) }
   }
 }
