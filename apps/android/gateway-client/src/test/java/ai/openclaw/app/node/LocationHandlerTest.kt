@@ -99,7 +99,7 @@ class LocationHandlerTest : NodeHandlerRobolectricTest() {
     }
 
   @Test
-  fun handleLocationGet_usesPreciseGpsFirstWhenFinePermissionAndPreciseEnabled() =
+  fun handleLocationGet_usesFusedThenGpsWhenFinePermissionAndPreciseEnabled() =
     runTest {
       val source =
         FakeLocationDataSource(
@@ -116,7 +116,10 @@ class LocationHandlerTest : NodeHandlerRobolectricTest() {
       val result = handler.handleLocationGet("""{"desiredAccuracy":"precise","maxAgeMs":1234,"timeoutMs":2000}""")
 
       assertTrue(result.ok)
-      assertEquals(listOf(LocationManager.GPS_PROVIDER, LocationManager.NETWORK_PROVIDER), source.lastDesiredProviders)
+      assertEquals(
+        listOf(LocationManager.FUSED_PROVIDER, LocationManager.GPS_PROVIDER, LocationManager.NETWORK_PROVIDER),
+        source.lastDesiredProviders,
+      )
       assertEquals(1234L, source.lastMaxAgeMs)
       assertEquals(2000L, source.lastTimeoutMs)
     }

@@ -1366,7 +1366,7 @@ internal class WearDirectRuntime(
     if (!current(intent)) return
     eventCounter.record(event, payload?.length ?: 0)
     val handlerStart = android.os.SystemClock.elapsedRealtime()
-    if (event == "talk.event" || event == "chat") talk.handleGatewayEvent(event, payload)
+    if (event == "talk.event" || event == "chat" || event == "agent") talk.handleGatewayEvent(event, payload)
     val handlerMillis = android.os.SystemClock.elapsedRealtime() - handlerStart
     if (handlerMillis > SLOW_EVENT_HANDLER_MS) connectionLog("slow handler $event ${handlerMillis}ms")
     if (event == "seqGap") {

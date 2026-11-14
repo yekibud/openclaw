@@ -113,6 +113,13 @@ internal class WearDirectTalkClient(
 
   @Volatile private var lastActivityMillis = 0L
 
+  // Agent runs (Talk consults) in progress: the voice goes quiet while Claw works, which must not count as idle.
+  private val activeAgentRuns: MutableSet<String> =
+    java.util.concurrent.ConcurrentHashMap
+      .newKeySet()
+
+  @Volatile private var lastAgentEventMillis = 0L
+
   @Volatile private var inputHeldUntilMillis = 0L
 
   @Volatile private var providerReady = false
@@ -282,6 +289,10 @@ internal class WearDirectTalkClient(
     payloadJson: String?,
   ) {
     val obj = parseJsonParamsObject(payloadJson) ?: return
+    if (event == "agent") {
+      noteAgentEvent(obj)
+      return
+    }
     if (event == "chat") {
       val runId = obj["runId"].asStringOrNull() ?: return
       val state = obj["state"].asStringOrNull() ?: return
@@ -417,16 +428,44 @@ internal class WearDirectTalkClient(
     }
   }
 
-  /** Ends Talk after TALK_IDLE_MILLIS with neither speech from the user nor reply audio (the session is otherwise open-ended). */
+  private fun noteAgentEvent(obj: JsonObject) {
+    val runId = obj["runId"].asStringOrNull() ?: return
+    val now = SystemClock.elapsedRealtime()
+    lastAgentEventMillis = now
+    if (obj["stream"].asStringOrNull() != "lifecycle") return
+    when ((obj["data"] as? JsonObject)?.get("phase").asStringOrNull()) {
+      "start" -> {
+        activeAgentRuns.add(runId)
+      }
+
+      "end", "error" -> {
+        activeAgentRuns.remove(runId)
+        lastActivityMillis = now // the idle wait restarts once the answer is ready
+      }
+    }
+  }
+
+  private fun agentWorking(now: Long): Boolean = activeAgentRuns.isNotEmpty() && now - lastAgentEventMillis < AGENT_RUN_STALE_MILLIS
+
+  /**
+   * Ends Talk after TALK_IDLE_MILLIS with neither speech from the user nor reply audio (the session is otherwise
+   * open-ended). Time while an agent run is in progress does not count, so a long lookup is not cut off.
+   */
   private fun startIdleWatchdog(
     attempt: Attempt,
     activeSessionId: String,
   ) {
     lastActivityMillis = SystemClock.elapsedRealtime()
+    activeAgentRuns.clear()
     eventScope?.launch {
       while (isCurrent(attempt, activeSessionId)) {
         delay(IDLE_CHECK_MILLIS)
-        if (isCurrent(attempt, activeSessionId) && SystemClock.elapsedRealtime() - lastActivityMillis > TALK_IDLE_MILLIS) {
+        val now = SystemClock.elapsedRealtime()
+        if (agentWorking(now)) {
+          lastActivityMillis = now
+          continue
+        }
+        if (isCurrent(attempt, activeSessionId) && now - lastActivityMillis > TALK_IDLE_MILLIS) {
           diagnostics.note("idle timeout: ending Talk")
           scope.launch { stop() }
           break
@@ -939,7 +978,10 @@ internal class WearDirectTalkClient(
 
     // 24 kHz mono PCM16 is 48 kB per second: about 90 seconds of reply audio may wait for the speaker.
     const val OUTPUT_BACKLOG_BYTE_CAPACITY = 48_000L * 90
-    const val TALK_IDLE_MILLIS = 45_000L
+    const val TALK_IDLE_MILLIS = 25_000L
+
+    // A run with no agent event for this long is treated as finished (a lost "end" event must not keep Talk open).
+    const val AGENT_RUN_STALE_MILLIS = 120_000L
     const val PROVIDER_READY_FALLBACK_MS = 10_000L
     const val LOCAL_FRAME_BYTES = 4_800
     const val TALK_PLAYBACK_GAIN_MB = 600 // +6 dB

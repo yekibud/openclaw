@@ -22,7 +22,8 @@ class LocationDisclosure(
     val initiallyPrecise = allowPrecise && preciseEnabled() && hasFinePermission()
     val providers =
       if (initiallyPrecise) {
-        listOf(LocationManager.GPS_PROVIDER, LocationManager.NETWORK_PROVIDER)
+        // GPS alone rarely fixes indoors within the timeout (seen on Pixel Watch); fused blends Wi-Fi, cell and GPS.
+        listOf(LocationManager.FUSED_PROVIDER, LocationManager.GPS_PROVIDER, LocationManager.NETWORK_PROVIDER)
       } else {
         listOf(LocationManager.NETWORK_PROVIDER, LocationManager.GPS_PROVIDER)
       }
