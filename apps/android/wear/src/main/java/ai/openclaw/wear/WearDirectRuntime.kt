@@ -521,6 +521,8 @@ internal class WearDirectRuntime(
     next.copy(selected = store.registry.activeEntry(), gateways = store.registry.entries.value)
   }
 
+  private fun caTrustedKey(endpoint: GatewayEndpoint) = "gateway.tls.ca-trusted.${endpoint.stableId}"
+
   private suspend fun connect(
     intent: Long,
     endpoint: GatewayEndpoint,
@@ -535,13 +537,21 @@ internal class WearDirectRuntime(
       val probe = tlsProbe.probe(endpoint.host, endpoint.port)
       if (!current(intent)) return
       when (val trust = decideGatewayTlsTrust(store.getString("gateway.tls.${endpoint.stableId}"), isGatewayTlsSystemTrustCandidate(endpoint.host), probe)) {
-        GatewayTlsTrustDecision.SystemTrusted -> {}
+        GatewayTlsTrustDecision.SystemTrusted -> {
+          if (store.getString(caTrustedKey(endpoint)) == null) store.putStringSynchronously(caTrustedKey(endpoint), "1")
+        }
 
         is GatewayTlsTrustDecision.PinnedTrust -> {
           fingerprint = trust.fingerprintSha256
         }
 
         is GatewayTlsTrustDecision.PromptRequired -> {
+          // A gateway that has validated against the system CA store never legitimately needs a manual pin; a prompt
+          // here means something on the path is presenting another certificate, and one tap would pin it for good.
+          if (trust.previousFingerprintSha256 == null && store.getString(caTrustedKey(endpoint)) != null) {
+            publish(intent) { copy(error = "Gateway certificate is not trusted on this network. Try another network.") }
+            return
+          }
           publish(intent) {
             copy(
               status = "Verify Gateway certificate",
