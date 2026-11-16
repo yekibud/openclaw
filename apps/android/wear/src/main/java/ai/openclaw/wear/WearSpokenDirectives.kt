@@ -29,11 +29,22 @@ private val TALK_STOP_PATTERNS =
     """\b(?:good ?bye|bye(?: bye)?|good night|that(?:'s| is) (?:all|it)(?: for now)?)\W*$""",
   ).map { Regex(it, RegexOption.IGNORE_CASE) }
 
+// A stop phrase must close the utterance: "Hold on, stop, stop, no stop. Can you speak more slowly" ended Talk mid-request.
+private const val MAX_WORDS_AFTER_STOP = 4
+private val WORD = Regex("""[\p{L}\p{N}']+""")
+private val NEGATED_BEFORE = Regex("""(?:\bno|n't|\bnot|\bnever)\s+$""", RegexOption.IGNORE_CASE)
+
 /**
  * True when a final user transcript asks to end Talk, alone or at the end of a longer sentence ("Okay, you can stop now, I
- * meant we're done"); a stop word that starts a request ("stop the timer") does not count.
+ * meant we're done"). It does not count when more than a few words follow ("stop, stop, no stop, can you ..."), when it is
+ * negated ("no stop", "don't stop"), or when the stop word starts a request ("stop the timer").
  */
 internal fun isTalkStopPhrase(utterance: String): Boolean {
   val text = utterance.trim().replace('’', '\'').replace('‘', '\'')
-  return TALK_STOP_PATTERNS.any { it.containsMatchIn(text) }
+  return TALK_STOP_PATTERNS.any { pattern ->
+    pattern.findAll(text).any { match ->
+      WORD.findAll(text.substring(match.range.last + 1)).count() <= MAX_WORDS_AFTER_STOP &&
+        !NEGATED_BEFORE.containsMatchIn(text.substring(0, match.range.first))
+    }
+  }
 }
