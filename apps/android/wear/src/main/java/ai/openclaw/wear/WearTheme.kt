@@ -29,7 +29,52 @@ internal data class WearSettings(
   val voiceName: String? = null,
   /** Spoken by the watch when Talk starts listening, so the user knows it is on; empty = no greeting. */
   val talkGreeting: String = DEFAULT_TALK_GREETING,
+  /** Which engine the Assist button starts: GPT-Live realtime Talk, or low-power voice chat (watch speech recognition). */
+  val talkEngine: WearTalkEngine = WearTalkEngine.Live,
+  /** Low-power voice chat reads replies with the watch voice at this pace and these pauses between sentences. */
+  val speechSpeed: WearSpeechSpeed = WearSpeechSpeed.Slow,
+  val speechPauses: WearSpeechPauses = WearSpeechPauses.LongPause,
 )
+
+internal enum class WearTalkEngine(
+  val rawValue: String,
+) {
+  Live("live"),
+  LowPower("low-power"),
+  ;
+
+  companion object {
+    fun fromRawValue(value: String?): WearTalkEngine = entries.firstOrNull { it.rawValue == value } ?: Live
+  }
+}
+
+internal enum class WearSpeechSpeed(
+  val rawValue: String,
+  val rate: Float,
+) {
+  Slow("slow", 0.8f),
+  Normal("normal", 1.0f),
+  Fast("fast", 1.25f),
+  ;
+
+  companion object {
+    fun fromRawValue(value: String?): WearSpeechSpeed? = entries.firstOrNull { it.rawValue == value?.trim()?.lowercase() }
+  }
+}
+
+internal enum class WearSpeechPauses(
+  val rawValue: String,
+  val millis: Long,
+) {
+  NoPause("none", 0L),
+  ShortPause("short", 1_000L),
+  LongPause("long", 5_000L),
+  ;
+
+  companion object {
+    fun fromRawValue(value: String?): WearSpeechPauses? = entries.firstOrNull { it.rawValue == value?.trim()?.lowercase() }
+  }
+}
 
 internal const val DEFAULT_TALK_GREETING = "Hey, what's up?"
 
@@ -50,7 +95,16 @@ internal class WearSettingsStore internal constructor(
       autoSpeak = preferences.getBoolean(AUTO_SPEAK_KEY, DEFAULT_AUTO_SPEAK),
       voiceName = preferences.getString(VOICE_KEY, null)?.takeIf { it.isNotBlank() },
       talkGreeting = preferences.getString(TALK_GREETING_KEY, null) ?: DEFAULT_TALK_GREETING,
+      talkEngine = WearTalkEngine.fromRawValue(preferences.getString(TALK_ENGINE_KEY, null)),
+      speechSpeed = WearSpeechSpeed.fromRawValue(preferences.getString(SPEECH_SPEED_KEY, null)) ?: WearSpeechSpeed.Slow,
+      speechPauses = WearSpeechPauses.fromRawValue(preferences.getString(SPEECH_PAUSES_KEY, null)) ?: WearSpeechPauses.LongPause,
     )
+
+  fun writeTalkEngine(engine: WearTalkEngine) = preferences.edit { putString(TALK_ENGINE_KEY, engine.rawValue) }
+
+  fun writeSpeechSpeed(speed: WearSpeechSpeed) = preferences.edit { putString(SPEECH_SPEED_KEY, speed.rawValue) }
+
+  fun writeSpeechPauses(pauses: WearSpeechPauses) = preferences.edit { putString(SPEECH_PAUSES_KEY, pauses.rawValue) }
 
   fun writeThemeMode(mode: WearThemeMode) {
     preferences.edit {
@@ -85,6 +139,9 @@ internal class WearSettingsStore internal constructor(
     const val AUTO_SPEAK_KEY = "conversation.autoSpeak"
     const val VOICE_KEY = "conversation.voice"
     const val TALK_GREETING_KEY = "conversation.talkGreeting"
+    const val TALK_ENGINE_KEY = "conversation.talkEngine"
+    const val SPEECH_SPEED_KEY = "conversation.speechSpeed"
+    const val SPEECH_PAUSES_KEY = "conversation.speechPauses"
   }
 }
 

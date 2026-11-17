@@ -36,7 +36,9 @@ internal class WearReplySpeaker(
   private var initializationFailed = false
   private var closed = false
   private var pendingText: String? = null
+  private var pendingPace: WearSpeechPace = WearSpeechPace.Default
   private var activeUtterance: String? = null
+  private var onFinished: (() -> Unit)? = null
 
   init {
     handler.post {
@@ -96,7 +98,7 @@ internal class WearReplySpeaker(
         .sortedWith(compareBy({ it.locale.country != "IN" }, { it.isNetworkConnectionRequired }, { it.locale.toLanguageTag() }, { it.name }))
     _availableVoices.value = voices.map { it.name }
     applyPreferredVoice()
-    pendingText?.let(::speakReady)
+    pendingText?.let { text -> speakReady(text, pendingPace, takeFinished()) }
   }
 
   private fun applyPreferredVoice() {
@@ -115,32 +117,65 @@ internal class WearReplySpeaker(
     }
   }
 
-  fun speak(text: String) {
-    val normalized = text.trim().takeIf(String::isNotEmpty) ?: return
+  fun speak(text: String) = speak(text, WearSpeechPace.Default, onDone = null)
+
+  /**
+   * Read [text] at [pace]: sentence by sentence with exact silences between them when it asks for pauses. [onDone] runs
+   * once, after the last sentence or when the speech fails or is stopped (on the speaker's worker thread).
+   */
+  fun speak(
+    text: String,
+    pace: WearSpeechPace,
+    onDone: (() -> Unit)?,
+  ) {
+    val normalized = text.trim().takeIf(String::isNotEmpty)
+    if (normalized == null) {
+      onDone?.invoke()
+      return
+    }
     handler.post {
       if (closed) return@post
-      speakReady(normalized)
+      speakReady(normalized, pace, onDone)
     }
   }
 
-  private fun speakReady(text: String) {
-    stopSpeaking()
+  private fun speakReady(
+    text: String,
+    pace: WearSpeechPace = WearSpeechPace.Default,
+    onDone: (() -> Unit)? = null,
+  ) {
+    stopSpeaking() // ends (and reports) any earlier reply first
+    onFinished = onDone
     if (initializationFailed) {
       fail()
       return
     }
     if (!ready) {
       pendingText = text
+      pendingPace = pace
       return
     }
     if (!audioFocus.request()) {
       fail()
       return
     }
-    val utterance = UUID.randomUUID().toString()
-    activeUtterance = utterance
-    val result = engine?.speak(text, TextToSpeech.QUEUE_FLUSH, Bundle(), utterance)
-    if (result != TextToSpeech.SUCCESS) finish(utterance, failed = true)
+    val currentEngine = engine ?: return
+    currentEngine.setSpeechRate(pace.rate)
+    val sentences = if (pace.pauseMillis > 0) splitSentences(text) else listOf(text)
+    // Only the last utterance id is "active": earlier sentences and silences finishing do not end the reply.
+    var last = ""
+    var result = TextToSpeech.SUCCESS
+    sentences.forEachIndexed { index, sentence ->
+      if (index > 0) {
+        val gap = UUID.randomUUID().toString()
+        result = result.coerceAtMost(currentEngine.playSilentUtterance(pace.pauseMillis, TextToSpeech.QUEUE_ADD, gap))
+      }
+      last = UUID.randomUUID().toString()
+      val mode = if (index == 0) TextToSpeech.QUEUE_FLUSH else TextToSpeech.QUEUE_ADD
+      result = result.coerceAtMost(currentEngine.speak(sentence, mode, Bundle(), last))
+    }
+    activeUtterance = last
+    if (result != TextToSpeech.SUCCESS) finish(last, failed = true)
   }
 
   private fun finish(
@@ -154,8 +189,11 @@ internal class WearReplySpeaker(
       _isSpeaking.value = false
       _failed.value = failed
       audioFocus.abandon()
+      takeFinished()?.invoke()
     }
   }
+
+  private fun takeFinished(): (() -> Unit)? = onFinished.also { onFinished = null }
 
   private fun fail() {
     pendingText = null
@@ -163,6 +201,7 @@ internal class WearReplySpeaker(
     _isSpeaking.value = false
     _failed.value = true
     audioFocus.abandon()
+    takeFinished()?.invoke()
   }
 
   fun stop() {
@@ -178,6 +217,7 @@ internal class WearReplySpeaker(
     _failed.value = false
     audioFocus.abandon()
     engine?.stop()
+    takeFinished()?.invoke()
   }
 
   fun shutdown() {
@@ -196,3 +236,20 @@ internal class WearReplySpeaker(
     }
   }
 }
+
+/** How a reply is read: engine speech rate (1.0 = normal) and the silence between sentences. */
+internal data class WearSpeechPace(
+  val rate: Float,
+  val pauseMillis: Long,
+) {
+  companion object {
+    val Default = WearSpeechPace(rate = 1.0f, pauseMillis = 0L)
+  }
+}
+
+// Not after "Dr." / "e.g." / an initial ("J. Smith"): a pause there would split a name or phrase.
+private val SENTENCE_END =
+  Regex("""(?<!\b(?:Dr|Mr|Mrs|Ms|St|Jr|Sr|vs|e\.g|i\.e|[A-Z])\.)(?<=[.!?…])\s+(?=\S)""")
+
+/** Sentences of a reply, for reading with pauses; a reply without sentence punctuation stays one piece. */
+internal fun splitSentences(text: String): List<String> = text.split(SENTENCE_END).map(String::trim).filter(String::isNotEmpty)

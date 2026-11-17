@@ -164,6 +164,14 @@
     <string name="watch_disconnect" tools:ignore="MissingTranslation">Disconnect</string>
     <string name="watch_reconnect" tools:ignore="MissingTranslation">Reconnect</string>
     <string name="watch_talk_stop" tools:ignore="MissingTranslation">Stop Talk</string>
+    <string name="watch_voice_chat_listening" tools:ignore="MissingTranslation">Listening… (hold the screen for push-to-talk)</string>
+    <string name="watch_voice_chat_thinking" tools:ignore="MissingTranslation">Asking Claw…</string>
+    <string name="watch_voice_chat_speaking" tools:ignore="MissingTranslation">Speaking… (hold the screen to interrupt)</string>
+    <string name="watch_talk_engine" tools:ignore="MissingTranslation">Talk</string>
+    <string name="watch_talk_engine_live" tools:ignore="MissingTranslation">GPT-Live</string>
+    <string name="watch_talk_engine_low_power" tools:ignore="MissingTranslation">Low power</string>
+    <string name="watch_speech_speed" tools:ignore="MissingTranslation">Speech speed</string>
+    <string name="watch_speech_pauses" tools:ignore="MissingTranslation">Pauses</string>
     <string name="watch_push_to_talk_on" tools:ignore="MissingTranslation">Push-to-talk: hold the screen to speak. Double-tap for open listening.</string>
     <string name="watch_push_to_talk_held" tools:ignore="MissingTranslation">Listening while you hold…</string>
     <string name="watch_location_off" tools:ignore="MissingTranslation">Share location: Off</string>

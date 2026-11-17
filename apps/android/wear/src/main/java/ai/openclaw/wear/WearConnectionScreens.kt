@@ -8,6 +8,7 @@ import android.Manifest
 import android.app.Activity
 import android.app.RemoteInput
 import android.content.Intent
+import android.view.WindowManager
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -132,6 +133,29 @@ private fun WearDirectContent(
   val speaking by speaker.isSpeaking.collectAsState()
   var autoSpeak by remember { mutableStateOf(settingsStore.read().autoSpeak) }
   var awaitingReplySince by remember { mutableStateOf<Long?>(null) }
+  var talkEngine by remember { mutableStateOf(settingsStore.read().talkEngine) }
+  var speechSpeed by remember { mutableStateOf(settingsStore.read().speechSpeed) }
+  var speechPauses by remember { mutableStateOf(settingsStore.read().speechPauses) }
+  val solicitedSinceHolder = remember { mutableStateOf<Long?>(null) }
+  // Low-power voice chat: watch speech recognition -> Claw (like a typed message) -> watch voice at the user's pace.
+  val voiceChat =
+    remember {
+      WearVoiceChat(context.applicationContext) { text ->
+        awaitingReplySince = System.currentTimeMillis()
+        solicitedSinceHolder.value = awaitingReplySince
+        runtime.send(text, runtime.inputOwner())
+      }
+    }
+  DisposableEffect(voiceChat) { onDispose { voiceChat.stop() } }
+  val voiceState by voiceChat.state.collectAsState()
+  val voiceActive = voiceState != WearVoiceChatState.Off
+  LaunchedEffect(voiceState) {
+    // A send that never got a reply (refused while another was pending, failed) must not leave voice chat waiting.
+    if (voiceState == WearVoiceChatState.Sending) {
+      delay(VOICE_CHAT_REPLY_TIMEOUT_MS)
+      if (voiceChat.state.value == WearVoiceChatState.Sending) voiceChat.replyMissing()
+    }
+  }
   val latestAssistant = state.messages.lastOrNull { it.role == "assistant" }
   val latestAssistantKey = latestAssistant?.let { "${it.id}:${it.timestamp}:${it.text.hashCode()}" }
   var seenAssistantKey by remember { mutableStateOf(latestAssistantKey) }
@@ -141,11 +165,26 @@ private fun WearDirectContent(
     val awaiting = awaitingReplySince != null
     awaitingReplySince = null
     if (!awaiting || latestAssistant == null || !lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)) return@LaunchedEffect
-    if (autoSpeak) speaker.speak(parseReplyNavigation(latestAssistant.text).text)
+    // "[voice: speed=…; pauses=…]" from Claw after a spoken change: apply and keep it, never read it out.
+    val reply = parseReplyVoice(parseReplyNavigation(latestAssistant.text).text)
+    reply.speed?.let {
+      speechSpeed = it
+      settingsStore.writeSpeechSpeed(it)
+    }
+    reply.pauses?.let {
+      speechPauses = it
+      settingsStore.writeSpeechPauses(it)
+    }
+    if (voiceActive) {
+      voiceChat.replyStarted()
+      speaker.speak(reply.text, WearSpeechPace(speechSpeed.rate, speechPauses.millis)) { voiceChat.replyFinished() }
+    } else if (autoSpeak) {
+      speaker.speak(reply.text)
+    }
   }
   // Maps opens only for a navigation reply that arrives after the user's own send or while their Talk session runs
   // (Talk consult answers reach the chat history, not the reply speaker). Markers already present are never replayed.
-  var solicitedSince by remember { mutableStateOf<Long?>(null) }
+  var solicitedSince by solicitedSinceHolder
   LaunchedEffect(state.talk.active) { if (state.talk.active) solicitedSince = System.currentTimeMillis() }
   val navigationReply = state.messages.lastOrNull { it.role == "assistant" && parseReplyNavigation(it.text).destination != null }
   val navigationKey = navigationReply?.let { "${it.id}:${it.timestamp}" }
@@ -183,7 +222,7 @@ private fun WearDirectContent(
   // Hold the screen while a reply is pending or Talk runs: Wear's 15 s timeout is shorter than most agent turns, and a
   // backgrounded app has its microphone silenced by the system.
   val view = LocalView.current
-  val holdScreen = awaitingReplySince != null || state.sending || state.runId != null || state.talk.active || state.talkBusy
+  val holdScreen = awaitingReplySince != null || state.sending || state.runId != null || state.talk.active || state.talkBusy || voiceActive
   DisposableEffect(view, holdScreen) {
     view.keepScreenOn = holdScreen
     onDispose { view.keepScreenOn = false }
@@ -194,7 +233,11 @@ private fun WearDirectContent(
     }
   val microphoneLauncher =
     rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
-      if (granted) runtime.startTalk()
+      if (granted && talkEngine == WearTalkEngine.LowPower) {
+        voiceChat.start()
+      } else if (granted) {
+        runtime.startTalk()
+      }
     }
   // Assistant button / Talk tile: start Talk as soon as the direct connection is ready, without a tap.
   var handledTalkRequest by remember { mutableStateOf<Int?>(null) }
@@ -219,13 +262,17 @@ private fun WearDirectContent(
   val resumed = lifecycleState.isAtLeast(Lifecycle.State.RESUMED)
   LaunchedEffect(talkWanted, resumed, state.connected, state.sessionKey, state.talkBusy, state.talk.active) {
     if (!talkWanted) return@LaunchedEffect
-    if (state.talk.active) {
+    if (state.talk.active || voiceActive) {
       talkWanted = false
     } else if (resumed && state.connected && state.sessionKey != null && !state.talkBusy) {
       // A reconnect flips connected and reruns this effect, which then probes the fresh connection.
       if (!runtime.probeConnection()) return@LaunchedEffect
       talkWanted = false
-      if (context.hasPermission(Manifest.permission.RECORD_AUDIO)) runtime.startTalk() else microphoneLauncher.launch(Manifest.permission.RECORD_AUDIO)
+      when {
+        !context.hasPermission(Manifest.permission.RECORD_AUDIO) -> microphoneLauncher.launch(Manifest.permission.RECORD_AUDIO)
+        talkEngine == WearTalkEngine.LowPower && voiceChat.available -> voiceChat.start()
+        else -> runtime.startTalk()
+      }
     }
   }
   val messageLauncher =
@@ -301,40 +348,90 @@ private fun WearDirectContent(
   }
   // While Talk starts or runs, show only Talk: launched from the assistant button the user must see at a glance that it
   // is listening, without scrolling the chat page.
-  if (!manage && page == "chat" && currentReview == null && (talkWanted || state.talk.active || state.talkBusy)) {
-    BackHandler {
+  if (!manage && page == "chat" && currentReview == null && (talkWanted || state.talk.active || state.talkBusy || voiceActive)) {
+    val stopAll = {
       talkWanted = false
-      runtime.stopTalk()
+      if (voiceActive) {
+        voiceChat.stop()
+        speaker.stop()
+      } else {
+        runtime.stopTalk()
+      }
     }
+    BackHandler { stopAll() }
     val pushToTalk by runtime.talk.pushToTalk.collectAsState()
+    // The screen stays on for Talk, but dimmed: full brightness only while the screen is held, Claw speaks, or for a few
+    // seconds after a touch (to read the transcript).
+    var touchedAt by remember { mutableStateOf(0L) }
+    var recentlyTouched by remember { mutableStateOf(false) }
+    LaunchedEffect(touchedAt) {
+      if (touchedAt == 0L) return@LaunchedEffect
+      recentlyTouched = true
+      delay(TALK_BRIGHT_AFTER_TOUCH_MS)
+      recentlyTouched = false
+    }
+    val voiceStatus =
+      when (voiceState) {
+        WearVoiceChatState.Listening -> stringResource(R.string.watch_voice_chat_listening)
+        WearVoiceChatState.Sending -> stringResource(R.string.watch_voice_chat_thinking)
+        WearVoiceChatState.Speaking -> stringResource(R.string.watch_voice_chat_speaking)
+        WearVoiceChatState.Off -> null
+      }
+    var voiceHeld by remember { mutableStateOf(false) }
+    val bright = pushToTalk == WearPushToTalk.Held || state.talk.speaking || recentlyTouched || voiceHeld || speaking
+    val activity = LocalContext.current as? Activity
+    DisposableEffect(activity, bright) {
+      fun setBrightness(level: Float) {
+        val window = activity?.window ?: return
+        window.attributes = window.attributes.apply { screenBrightness = level }
+      }
+      setBrightness(if (bright) WindowManager.LayoutParams.BRIGHTNESS_OVERRIDE_NONE else TALK_DIM_BRIGHTNESS)
+      onDispose { setBrightness(WindowManager.LayoutParams.BRIGHTNESS_OVERRIDE_NONE) }
+    }
     // Hold anywhere (past PUSH_TO_TALK_HOLD_MS, so taps and scrolling stay normal) to speak with the mic at the mouth;
     // the first hold switches this session to push-to-talk, a double tap returns to open listening.
     Box(
       Modifier
         .fillMaxSize()
-        .pointerInput(state.talk.active) {
-          if (!state.talk.active) return@pointerInput
+        .pointerInput(state.talk.active, voiceActive) {
+          if (!state.talk.active && !voiceActive) return@pointerInput
           detectTapGestures(
-            onDoubleTap = { runtime.talk.pushToTalkOff() },
+            onDoubleTap = { if (!voiceActive) runtime.talk.pushToTalkOff() },
             onPress = {
+              touchedAt = System.currentTimeMillis()
               var holding = false
               coroutineScope {
                 val hold =
                   launch {
                     delay(PUSH_TO_TALK_HOLD_MS)
                     holding = true
-                    runtime.talk.pushToTalkPress()
+                    if (voiceActive) {
+                      voiceHeld = true
+                      speaker.stop() // a hold interrupts the reply, like speaking over GPT-Live
+                      voiceChat.holdStart()
+                    } else {
+                      runtime.talk.pushToTalkPress()
+                    }
                   }
                 tryAwaitRelease()
                 hold.cancel()
               }
-              if (holding) runtime.talk.pushToTalkRelease()
+              if (holding && voiceActive) {
+                voiceHeld = false
+                voiceChat.holdEnd()
+              } else if (holding) {
+                runtime.talk.pushToTalkRelease()
+              }
             },
           )
         },
     ) {
       WearPage(pageLabel = stringResource(R.string.talk)) {
-        item { DirectText(if (state.talk.active || state.talk.statusText.isNotBlank()) state.talk.statusText else state.status) }
+        item {
+          DirectText(
+            voiceStatus ?: if (state.talk.active || state.talk.statusText.isNotBlank()) state.talk.statusText else state.status,
+          )
+        }
         when (pushToTalk) {
           WearPushToTalk.Held -> {
             item { DirectText(stringResource(R.string.watch_push_to_talk_held)) }
@@ -346,23 +443,32 @@ private fun WearDirectContent(
 
           WearPushToTalk.Off -> {}
         }
-        state.talk.conversation.takeLast(2).forEach { entry ->
-          item {
-            MessageBubble(
-              if (entry.role == WearRealtimeTalkRole.USER) WearChatRole.USER else WearChatRole.ASSISTANT,
-              entry.text,
-              truncated = entry.textTruncated,
-              streaming = entry.streaming,
-              onOpenReply = {},
-            )
+        if (voiceActive) {
+          state.messages.takeLast(2).forEach { message ->
+            item {
+              MessageBubble(
+                message.chatRole,
+                parseReplyVoice(parseReplyNavigation(message.text).text).text,
+                truncated = message.textTruncated == true,
+                onOpenReply = {},
+              )
+            }
           }
         }
-        item {
-          SecondaryButton(stringResource(R.string.watch_talk_stop), true) {
-            talkWanted = false
-            runtime.stopTalk()
+        if (!voiceActive) {
+          state.talk.conversation.takeLast(2).forEach { entry ->
+            item {
+              MessageBubble(
+                if (entry.role == WearRealtimeTalkRole.USER) WearChatRole.USER else WearChatRole.ASSISTANT,
+                entry.text,
+                truncated = entry.textTruncated,
+                streaming = entry.streaming,
+                onOpenReply = {},
+              )
+            }
           }
         }
+        item { SecondaryButton(stringResource(R.string.watch_talk_stop), true) { stopAll() } }
       }
     }
     return
@@ -444,7 +550,29 @@ private fun WearDirectContent(
           voiceName = next
           settingsStore.writeVoice(next)
           speaker.setVoice(next)
-          speaker.speak("This is how I will read your replies.")
+          speaker.speak("This is how I will read your replies.", WearSpeechPace(speechSpeed.rate, 0L), onDone = null)
+        }
+      }
+      // Assist button engine: GPT-Live Talk, or low-power voice chat (watch speech recognition, every request to Claw).
+      item {
+        val label = stringResource(if (talkEngine == WearTalkEngine.LowPower) R.string.watch_talk_engine_low_power else R.string.watch_talk_engine_live)
+        SecondaryButton(stringResource(R.string.watch_talk_engine) + ": " + label, true) {
+          talkEngine = if (talkEngine == WearTalkEngine.LowPower) WearTalkEngine.Live else WearTalkEngine.LowPower
+          settingsStore.writeTalkEngine(talkEngine)
+        }
+      }
+      // How the watch voice reads replies in low-power voice chat (Claw can also change these by voice).
+      item {
+        SecondaryButton(stringResource(R.string.watch_speech_speed) + ": " + speechSpeed.rawValue, true) {
+          speechSpeed = WearSpeechSpeed.entries[(speechSpeed.ordinal + 1) % WearSpeechSpeed.entries.size]
+          settingsStore.writeSpeechSpeed(speechSpeed)
+          speaker.speak("This is my reading speed. And this is the next sentence.", WearSpeechPace(speechSpeed.rate, speechPauses.millis), onDone = null)
+        }
+      }
+      item {
+        SecondaryButton(stringResource(R.string.watch_speech_pauses) + ": " + speechPauses.rawValue, true) {
+          speechPauses = WearSpeechPauses.entries[(speechPauses.ordinal + 1) % WearSpeechPauses.entries.size]
+          settingsStore.writeSpeechPauses(speechPauses)
         }
       }
       val sharingLocation = state.locationMode != LocationMode.Off
@@ -622,3 +750,6 @@ private const val CLOCK_SKEW_MS = 30_000L
 private const val GREETING_HOLD_PAD_MS = 400L
 
 private const val PUSH_TO_TALK_HOLD_MS = 300L
+private const val TALK_DIM_BRIGHTNESS = 0.15f
+private const val TALK_BRIGHT_AFTER_TOUCH_MS = 8_000L
+private const val VOICE_CHAT_REPLY_TIMEOUT_MS = 120_000L

@@ -132,6 +132,10 @@ internal class WearDirectTalkClient(
     _pushToTalk.value = WearPushToTalk.Held
     releaseSilenceFrames = 0
     lastActivityMillis = SystemClock.elapsedRealtime()
+    synchronized(audioLock) {
+      val attempt = activeAttempt ?: return
+      if (!_isCapturing.value) runCatching { startCaptureLocked(attempt, evenWhilePlaying = true) }
+    }
   }
 
   fun pushToTalkRelease() {
@@ -142,26 +146,45 @@ internal class WearDirectTalkClient(
   }
 
   fun pushToTalkOff() {
+    val wasIdle = pushToTalkIdle()
     releaseSilenceFrames = 0
     _pushToTalk.value = WearPushToTalk.Off
+    if (wasIdle) {
+      synchronized(audioLock) {
+        val attempt = activeAttempt ?: return
+        if (!_isCapturing.value) runCatching { startCaptureLocked(attempt, evenWhilePlaying = true) }
+      }
+    }
   }
 
-  /** The mic frame to send now under push-to-talk, or null to send nothing (open listening sends every frame). */
-  private fun gatePushToTalk(frame: ByteArray): ByteArray? =
+  // Open listening sends audio only around speech: uncompressed mic audio over LTE was most of Talk's battery cost.
+  // A short pre-roll keeps the first syllable; the hangover is real (quiet) audio longer than the provider's end-of-speech
+  // silence, so it still sees the pause that ends the turn.
+  private val speechGate = WearSpeechGate(SEND_GATE_RMS, SEND_GATE_PRE_ROLL_FRAMES, SEND_GATE_HANGOVER_FRAMES)
+
+  /** Mic frames to send now: push-to-talk sends only while held (then silence to end the turn), open listening near speech. */
+  private fun gateFrames(frame: ByteArray): List<ByteArray> =
     when (_pushToTalk.value) {
-      WearPushToTalk.Off, WearPushToTalk.Held -> {
-        frame
+      WearPushToTalk.Held -> {
+        listOf(frame)
+      }
+
+      WearPushToTalk.Off -> {
+        speechGate.offer(frame)
       }
 
       WearPushToTalk.Waiting -> {
         if (releaseSilenceFrames > 0) {
           releaseSilenceFrames -= 1
-          ByteArray(frame.size)
+          listOf(ByteArray(frame.size))
         } else {
-          null
+          emptyList()
         }
       }
     }
+
+  /** Push-to-talk released and its closing silence sent: the mic stays off until the next hold. */
+  private fun pushToTalkIdle(): Boolean = _pushToTalk.value == WearPushToTalk.Waiting && releaseSilenceFrames == 0
 
   @Volatile private var inputHeldUntilMillis = 0L
 
@@ -617,8 +640,12 @@ internal class WearDirectTalkClient(
   }
 
   @SuppressLint("MissingPermission")
-  private fun startCaptureLocked(attempt: Attempt) {
-    if (_isCapturing.value || _isPlaying.value || activeAttempt !== attempt) return
+  private fun startCaptureLocked(
+    attempt: Attempt,
+    evenWhilePlaying: Boolean = false,
+  ) {
+    if (_isCapturing.value || (_isPlaying.value && !evenWhilePlaying) || activeAttempt !== attempt) return
+    if (pushToTalkIdle()) return // push-to-talk keeps the mic off between holds
     val frameBytes = WearProtocol.REALTIME_AUDIO_SAMPLE_RATE_HZ * PCM_16_BYTES * CAPTURE_FRAME_MILLIS / 1_000
     val minimumBuffer =
       AudioRecord.getMinBufferSize(
@@ -680,7 +707,22 @@ internal class WearDirectTalkClient(
             val frame = buffer.copyOf(evenBytes)
             // Push-to-talk means the watch is at the mouth: far less gain, so street noise is not boosted with the voice.
             if (headphones) amplifyPcm16(frame, if (_pushToTalk.value == WearPushToTalk.Off) HEADPHONE_MIC_GAIN else PUSH_TO_TALK_MIC_GAIN)
-            gatePushToTalk(frame)?.let { audioFrames?.trySend(it) }
+            gateFrames(frame).forEach { audioFrames?.trySend(it) }
+            if (pushToTalkIdle()) {
+              // Stop recording between holds. This loop is the capture job, so it marks capture stopped itself and the
+              // finally block below stops and releases the recorder; the next hold starts a fresh one.
+              synchronized(audioLock) {
+                if (audioRecord === recorder) {
+                  setCapturing(false)
+                  captureJob = null
+                  runCatching { echoCanceler?.release() }
+                  echoCanceler = null
+                  runCatching { gainControl?.release() }
+                  gainControl = null
+                }
+              }
+              break
+            }
           }
         } catch (err: Throwable) {
           if (err is CancellationException) throw err
@@ -1063,6 +1105,11 @@ internal class WearDirectTalkClient(
     const val PUSH_TO_TALK_MIC_GAIN = 4
     const val PUSH_TO_TALK_RELEASE_SILENCE_MS = 1_300
     const val PUSH_TO_TALK_IDLE_MILLIS = 90_000L
+
+    // Open-listening send gate (levels after gain): ambient was ~250 indoors with headphones, speech is well above 600.
+    const val SEND_GATE_RMS = 400.0
+    const val SEND_GATE_PRE_ROLL_FRAMES = 4 // 400 ms
+    const val SEND_GATE_HANGOVER_FRAMES = 15 // 1.5 s, longer than silenceDurationMs (1000)
     const val ISO_639_1_LANGUAGE_LENGTH = 2
     const val MOUTH_QUEUE_CAPACITY = 256
     const val PCM_16_BYTES = 2
@@ -1089,3 +1136,32 @@ internal fun amplifyPcm16(
 
 /** Off = open listening (default); Held = screen held, mic sent; Waiting = push-to-talk on, screen released, mic muted. */
 internal enum class WearPushToTalk { Off, Held, Waiting }
+
+/**
+ * Passes mic frames only around speech: a frame at or above [threshold] RMS opens the gate and releases up to [preRoll]
+ * frames buffered before it; the gate stays open for [hangover] frames after the last loud one.
+ */
+internal class WearSpeechGate(
+  private val threshold: Double,
+  private val preRoll: Int,
+  private val hangover: Int,
+) {
+  private val buffered = ArrayDeque<ByteArray>()
+  private var remaining = 0
+
+  fun offer(frame: ByteArray): List<ByteArray> {
+    if (pcm16Rms(frame) >= threshold) {
+      val out = buffered.toList() + frame
+      buffered.clear()
+      remaining = hangover
+      return out
+    }
+    if (remaining > 0) {
+      remaining -= 1
+      return listOf(frame)
+    }
+    buffered.addLast(frame)
+    while (buffered.size > preRoll) buffered.removeFirst()
+    return emptyList()
+  }
+}
