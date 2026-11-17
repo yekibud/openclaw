@@ -164,6 +164,8 @@
     <string name="watch_disconnect" tools:ignore="MissingTranslation">Disconnect</string>
     <string name="watch_reconnect" tools:ignore="MissingTranslation">Reconnect</string>
     <string name="watch_talk_stop" tools:ignore="MissingTranslation">Stop Talk</string>
+    <string name="watch_push_to_talk_on" tools:ignore="MissingTranslation">Push-to-talk: hold the screen to speak. Double-tap for open listening.</string>
+    <string name="watch_push_to_talk_held" tools:ignore="MissingTranslation">Listening while you hold…</string>
     <string name="watch_location_off" tools:ignore="MissingTranslation">Share location: Off</string>
     <string name="watch_location_on" tools:ignore="MissingTranslation">Share location: On</string>
     <string name="watch_location_shared" tools:ignore="MissingTranslation">The Gateway can request this watch\'s location while the app is open.</string>

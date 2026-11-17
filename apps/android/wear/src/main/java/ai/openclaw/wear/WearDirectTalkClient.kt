@@ -120,6 +120,49 @@ internal class WearDirectTalkClient(
 
   @Volatile private var lastAgentEventMillis = 0L
 
+  // Optional push-to-talk for noisy places: the first screen hold switches this Talk session to it; the mic is then only
+  // sent while the screen is held. Off (open listening) is the default for every new session.
+  private val _pushToTalk = MutableStateFlow(WearPushToTalk.Off)
+  val pushToTalk: StateFlow<WearPushToTalk> = _pushToTalk
+
+  // Silent frames sent after a release so the provider's end-of-speech detection (silenceDurationMs) ends the turn now.
+  @Volatile private var releaseSilenceFrames = 0
+
+  fun pushToTalkPress() {
+    _pushToTalk.value = WearPushToTalk.Held
+    releaseSilenceFrames = 0
+    lastActivityMillis = SystemClock.elapsedRealtime()
+  }
+
+  fun pushToTalkRelease() {
+    if (_pushToTalk.value != WearPushToTalk.Held) return
+    releaseSilenceFrames = PUSH_TO_TALK_RELEASE_SILENCE_MS / CAPTURE_FRAME_MILLIS
+    _pushToTalk.value = WearPushToTalk.Waiting
+    lastActivityMillis = SystemClock.elapsedRealtime()
+  }
+
+  fun pushToTalkOff() {
+    releaseSilenceFrames = 0
+    _pushToTalk.value = WearPushToTalk.Off
+  }
+
+  /** The mic frame to send now under push-to-talk, or null to send nothing (open listening sends every frame). */
+  private fun gatePushToTalk(frame: ByteArray): ByteArray? =
+    when (_pushToTalk.value) {
+      WearPushToTalk.Off, WearPushToTalk.Held -> {
+        frame
+      }
+
+      WearPushToTalk.Waiting -> {
+        if (releaseSilenceFrames > 0) {
+          releaseSilenceFrames -= 1
+          ByteArray(frame.size)
+        } else {
+          null
+        }
+      }
+    }
+
   @Volatile private var inputHeldUntilMillis = 0L
 
   @Volatile private var providerReady = false
@@ -465,7 +508,8 @@ internal class WearDirectTalkClient(
           lastActivityMillis = now
           continue
         }
-        if (isCurrent(attempt, activeSessionId) && now - lastActivityMillis > TALK_IDLE_MILLIS) {
+        val idleLimit = if (_pushToTalk.value == WearPushToTalk.Off) TALK_IDLE_MILLIS else PUSH_TO_TALK_IDLE_MILLIS
+        if (isCurrent(attempt, activeSessionId) && now - lastActivityMillis > idleLimit) {
           diagnostics.note("idle timeout: ending Talk")
           scope.launch { stop() }
           break
@@ -634,8 +678,9 @@ internal class WearDirectTalkClient(
               continue
             }
             val frame = buffer.copyOf(evenBytes)
-            if (headphones) amplifyPcm16(frame, HEADPHONE_MIC_GAIN)
-            audioFrames?.trySend(frame)
+            // Push-to-talk means the watch is at the mouth: far less gain, so street noise is not boosted with the voice.
+            if (headphones) amplifyPcm16(frame, if (_pushToTalk.value == WearPushToTalk.Off) HEADPHONE_MIC_GAIN else PUSH_TO_TALK_MIC_GAIN)
+            gatePushToTalk(frame)?.let { audioFrames?.trySend(it) }
           }
         } catch (err: Throwable) {
           if (err is CancellationException) throw err
@@ -958,6 +1003,7 @@ internal class WearDirectTalkClient(
 
   private fun resetLocked() {
     val closingAttemptId = activeAttempt?.id
+    pushToTalkOff()
     agent.resetTransport()
     closeTransportLocked()
     streamingEntryIds.clear()
@@ -1011,6 +1057,12 @@ internal class WearDirectTalkClient(
     const val OUTPUT_QUEUE_BASE64_CHAR_CAPACITY = (OUTPUT_QUEUE_BYTE_CAPACITY + 2) / 3 * 4
     const val SESSION_CREATE_TIMEOUT_MILLIS = 15_000L
     const val CAPTURE_FRAME_MILLIS = 100
+
+    // Push-to-talk: watch held at the mouth (gain is a first guess; tune from a street test), a release sends 1.3 s
+    // of silence (provider silenceDurationMs is 1000), and pauses between holds may be longer than in open listening.
+    const val PUSH_TO_TALK_MIC_GAIN = 4
+    const val PUSH_TO_TALK_RELEASE_SILENCE_MS = 1_300
+    const val PUSH_TO_TALK_IDLE_MILLIS = 90_000L
     const val ISO_639_1_LANGUAGE_LENGTH = 2
     const val MOUTH_QUEUE_CAPACITY = 256
     const val PCM_16_BYTES = 2
@@ -1034,3 +1086,6 @@ internal fun amplifyPcm16(
     i += 2
   }
 }
+
+/** Off = open listening (default); Held = screen held, mic sent; Waiting = push-to-talk on, screen released, mic muted. */
+internal enum class WearPushToTalk { Off, Held, Waiting }

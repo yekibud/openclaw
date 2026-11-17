@@ -11,6 +11,9 @@ import android.content.Intent
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.text.BasicTextField
@@ -24,6 +27,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.res.stringResource
@@ -41,7 +45,9 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.wear.compose.material3.AppScaffold
 import androidx.wear.compose.material3.Text
 import androidx.wear.input.RemoteInputIntentHelper
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 
 @Composable
 internal fun WearConnectionHost(
@@ -300,23 +306,62 @@ private fun WearDirectContent(
       talkWanted = false
       runtime.stopTalk()
     }
-    WearPage(pageLabel = stringResource(R.string.talk)) {
-      item { DirectText(if (state.talk.active || state.talk.statusText.isNotBlank()) state.talk.statusText else state.status) }
-      state.talk.conversation.takeLast(2).forEach { entry ->
-        item {
-          MessageBubble(
-            if (entry.role == WearRealtimeTalkRole.USER) WearChatRole.USER else WearChatRole.ASSISTANT,
-            entry.text,
-            truncated = entry.textTruncated,
-            streaming = entry.streaming,
-            onOpenReply = {},
+    val pushToTalk by runtime.talk.pushToTalk.collectAsState()
+    // Hold anywhere (past PUSH_TO_TALK_HOLD_MS, so taps and scrolling stay normal) to speak with the mic at the mouth;
+    // the first hold switches this session to push-to-talk, a double tap returns to open listening.
+    Box(
+      Modifier
+        .fillMaxSize()
+        .pointerInput(state.talk.active) {
+          if (!state.talk.active) return@pointerInput
+          detectTapGestures(
+            onDoubleTap = { runtime.talk.pushToTalkOff() },
+            onPress = {
+              var holding = false
+              coroutineScope {
+                val hold =
+                  launch {
+                    delay(PUSH_TO_TALK_HOLD_MS)
+                    holding = true
+                    runtime.talk.pushToTalkPress()
+                  }
+                tryAwaitRelease()
+                hold.cancel()
+              }
+              if (holding) runtime.talk.pushToTalkRelease()
+            },
           )
+        },
+    ) {
+      WearPage(pageLabel = stringResource(R.string.talk)) {
+        item { DirectText(if (state.talk.active || state.talk.statusText.isNotBlank()) state.talk.statusText else state.status) }
+        when (pushToTalk) {
+          WearPushToTalk.Held -> {
+            item { DirectText(stringResource(R.string.watch_push_to_talk_held)) }
+          }
+
+          WearPushToTalk.Waiting -> {
+            item { DirectText(stringResource(R.string.watch_push_to_talk_on)) }
+          }
+
+          WearPushToTalk.Off -> {}
         }
-      }
-      item {
-        SecondaryButton(stringResource(R.string.watch_talk_stop), true) {
-          talkWanted = false
-          runtime.stopTalk()
+        state.talk.conversation.takeLast(2).forEach { entry ->
+          item {
+            MessageBubble(
+              if (entry.role == WearRealtimeTalkRole.USER) WearChatRole.USER else WearChatRole.ASSISTANT,
+              entry.text,
+              truncated = entry.textTruncated,
+              streaming = entry.streaming,
+              onOpenReply = {},
+            )
+          }
+        }
+        item {
+          SecondaryButton(stringResource(R.string.watch_talk_stop), true) {
+            talkWanted = false
+            runtime.stopTalk()
+          }
         }
       }
     }
@@ -575,3 +620,5 @@ private const val AUTO_TALK_WAIT_MS = 45_000L
 private const val SOLICITED_NAVIGATION_WINDOW_MS = 5 * 60_000L
 private const val CLOCK_SKEW_MS = 30_000L
 private const val GREETING_HOLD_PAD_MS = 400L
+
+private const val PUSH_TO_TALK_HOLD_MS = 300L
