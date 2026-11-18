@@ -30,7 +30,7 @@ internal data class WearSettings(
   /** Spoken by the watch when Talk starts listening, so the user knows it is on; empty = no greeting. */
   val talkGreeting: String = DEFAULT_TALK_GREETING,
   /** Which engine the Assist button starts: GPT-Live realtime Talk, or low-power voice chat (watch speech recognition). */
-  val talkEngine: WearTalkEngine = WearTalkEngine.Live,
+  val talkEngine: WearTalkEngine = WearTalkEngine.LowPower,
   /** Low-power voice chat reads replies with the watch voice at this pace and these pauses between sentences. */
   val speechSpeed: WearSpeechSpeed = WearSpeechSpeed.Slow,
   val speechPauses: WearSpeechPauses = WearSpeechPauses.LongPause,
@@ -44,7 +44,7 @@ internal enum class WearTalkEngine(
   ;
 
   companion object {
-    fun fromRawValue(value: String?): WearTalkEngine = entries.firstOrNull { it.rawValue == value } ?: Live
+    fun fromRawValue(value: String?): WearTalkEngine = entries.firstOrNull { it.rawValue == value } ?: LowPower
   }
 }
 

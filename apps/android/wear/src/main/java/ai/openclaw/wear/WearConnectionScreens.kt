@@ -654,17 +654,19 @@ private fun WearDirectContent(
       item { DirectText(state.status) }
       item { SecondaryButton(stringResource(R.string.watch_sessions), state.connected) { page = "sessions" } }
       item { SecondaryButton(stringResource(R.string.watch_approvals), state.connected) { page = "approvals" } }
-      val talkActive = state.talk.active
+      val talkActive = state.talk.active || voiceActive
       item {
         SecondaryButton(stringResource(if (talkActive) R.string.watch_talk_stop else R.string.talk), state.connected && state.sessionKey != null && !state.talkBusy) {
           when {
-            talkActive -> runtime.stopTalk()
-            context.hasPermission(Manifest.permission.RECORD_AUDIO) -> runtime.startTalk()
-            else -> microphoneLauncher.launch(Manifest.permission.RECORD_AUDIO)
+            voiceActive -> voiceChat.stop()
+            state.talk.active -> runtime.stopTalk()
+            !context.hasPermission(Manifest.permission.RECORD_AUDIO) -> microphoneLauncher.launch(Manifest.permission.RECORD_AUDIO)
+            talkEngine == WearTalkEngine.LowPower && voiceChat.available -> voiceChat.start()
+            else -> runtime.startTalk()
           }
         }
       }
-      if (talkActive || state.talk.status == WearRealtimeTalkStatus.ERROR) {
+      if (state.talk.active || state.talk.status == WearRealtimeTalkStatus.ERROR) {
         item { DirectText(state.talk.statusText) }
         state.talk.conversation.takeLast(2).forEach { entry ->
           item {
