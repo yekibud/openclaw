@@ -1123,21 +1123,23 @@ internal class WearDirectRuntime(
     }
   }
 
+  /** Returns false when the message was not taken (another send is still pending, wrong input owner, no session). */
   fun send(
     message: String,
     input: WearInputOwner,
-  ) {
-    val text = applySpokenDirectives(message.trim()).takeIf { it.isNotEmpty() && it.length <= 4000 } ?: return
+  ): Boolean {
+    val text = applySpokenDirectives(message.trim()).takeIf { it.isNotEmpty() && it.length <= 4000 } ?: return false
     val attempt =
       synchronized(lock) {
         val state = mutableState.value
-        if (input != inputOwner() || state.pendingSend != null || state.sending || state.sendUnknown) return
+        if (input != inputOwner() || state.pendingSend != null || state.sending || state.sendUnknown) return false
         // Input can return before foreground reconnection is ready. Retain it without automatic replay.
-        WearDirectSend(state.sessionKey ?: return, text, state.sessionAgentId).also {
+        WearDirectSend(state.sessionKey ?: return false, text, state.sessionAgentId).also {
           mutableState.value = state.copy(pendingSend = it, error = null)
         }
       }
     send(attempt)
+    return true
   }
 
   fun retrySend() {

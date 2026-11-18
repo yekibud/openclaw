@@ -166,7 +166,7 @@
     <string name="watch_talk_stop" tools:ignore="MissingTranslation">Stop Talk</string>
     <string name="watch_voice_chat_listening" tools:ignore="MissingTranslation">Listening… (hold the screen for push-to-talk)</string>
     <string name="watch_voice_chat_thinking" tools:ignore="MissingTranslation">Asking Claw…</string>
-    <string name="watch_voice_chat_speaking" tools:ignore="MissingTranslation">Speaking… (hold the screen to interrupt)</string>
+    <string name="watch_voice_chat_speaking" tools:ignore="MissingTranslation">Speaking… (tap, or talk in a pause, to interrupt)</string>
     <string name="watch_talk_engine" tools:ignore="MissingTranslation">Talk</string>
     <string name="watch_talk_engine_live" tools:ignore="MissingTranslation">GPT-Live</string>
     <string name="watch_talk_engine_low_power" tools:ignore="MissingTranslation">Low power</string>

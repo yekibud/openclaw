@@ -26,6 +26,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.input.pointer.pointerInput
@@ -46,9 +47,12 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.wear.compose.material3.AppScaffold
 import androidx.wear.compose.material3.Text
 import androidx.wear.input.RemoteInputIntentHelper
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlin.coroutines.resume
 
 @Composable
 internal fun WearConnectionHost(
@@ -138,14 +142,29 @@ private fun WearDirectContent(
   var speechPauses by remember { mutableStateOf(settingsStore.read().speechPauses) }
   val solicitedSinceHolder = remember { mutableStateOf<Long?>(null) }
   // Low-power voice chat: watch speech recognition -> Claw (like a typed message) -> watch voice at the user's pace.
+  val voiceSend = remember { mutableStateOf<String?>(null) }
+  val scope = rememberCoroutineScope()
+  var voiceReading by remember { mutableStateOf<Job?>(null) }
   val voiceChat =
     remember {
-      WearVoiceChat(context.applicationContext) { text ->
-        awaitingReplySince = System.currentTimeMillis()
-        solicitedSinceHolder.value = awaitingReplySince
-        runtime.send(text, runtime.inputOwner())
-      }
+      WearVoiceChat(context.applicationContext) { text -> voiceSend.value = text }
     }
+  LaunchedEffect(voiceSend.value) {
+    val text = voiceSend.value ?: return@LaunchedEffect
+    voiceSend.value = null
+    // A previous send can still be waiting for its acknowledgement; retry briefly rather than drop the words.
+    val deadline = System.currentTimeMillis() + VOICE_CHAT_SEND_RETRY_MS
+    while (true) {
+      val sentAt = System.currentTimeMillis()
+      awaitingReplySince = sentAt
+      solicitedSinceHolder.value = sentAt
+      if (runtime.send(text, runtime.inputOwner())) return@LaunchedEffect
+      awaitingReplySince = null
+      if (System.currentTimeMillis() > deadline) break
+      delay(VOICE_CHAT_SEND_STEP_MS)
+    }
+    voiceChat.replyMissing()
+  }
   DisposableEffect(voiceChat) { onDispose { voiceChat.stop() } }
   val voiceState by voiceChat.state.collectAsState()
   val voiceActive = voiceState != WearVoiceChatState.Off
@@ -159,10 +178,16 @@ private fun WearDirectContent(
   val latestAssistant = state.messages.lastOrNull { it.role == "assistant" }
   val latestAssistantKey = latestAssistant?.let { "${it.id}:${it.timestamp}:${it.text.hashCode()}" }
   var seenAssistantKey by remember { mutableStateOf(latestAssistantKey) }
-  LaunchedEffect(latestAssistantKey) {
+  val runIdle = state.runId == null
+  LaunchedEffect(latestAssistantKey, runIdle) {
     if (latestAssistantKey == seenAssistantKey) return@LaunchedEffect
+    val since = awaitingReplySince
+    // The reply is the newest assistant text once the run is over: text written before tool calls ("let me check")
+    // and history reloads of older replies must not be read as the answer, or the real answer arrives unheard.
+    val older = (latestAssistant?.timestamp ?: Long.MAX_VALUE) < (since ?: 0L) - CLOCK_SKEW_MS
+    if (since != null && (!runIdle || older)) return@LaunchedEffect
     seenAssistantKey = latestAssistantKey
-    val awaiting = awaitingReplySince != null
+    val awaiting = since != null
     awaitingReplySince = null
     if (!awaiting || latestAssistant == null || !lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)) return@LaunchedEffect
     // "[voice: speed=…; pauses=…]" from Claw after a spoken change: apply and keep it, never read it out.
@@ -175,9 +200,12 @@ private fun WearDirectContent(
       speechPauses = it
       settingsStore.writeSpeechPauses(it)
     }
-    if (voiceActive) {
+    if (voiceActive && voiceChat.state.value == WearVoiceChatState.Listening) {
+      // The user is already saying something new (a hold during the wait); the reply stays on screen unread.
+    } else if (voiceActive) {
       voiceChat.replyStarted()
-      speaker.speak(reply.text, WearSpeechPace(speechSpeed.rate, speechPauses.millis)) { voiceChat.replyFinished() }
+      voiceReading?.cancel()
+      voiceReading = scope.launch { readVoiceReply(reply.text, speaker, voiceChat, speechSpeed.rate, speechPauses.millis) }
     } else if (autoSpeak) {
       speaker.speak(reply.text)
     }
@@ -206,6 +234,13 @@ private fun WearDirectContent(
   // is withheld from the model while it plays so the model does not answer the greeting.
   val greetingText = remember { settingsStore.read().talkGreeting.trim() }
   var greetingPcm by remember { mutableStateOf<ByteArray?>(null) }
+  // Low-power voice chat greets with the watch voice and starts listening once the greeting has been read.
+  val startVoiceChat = {
+    if (voiceChat.state.value == WearVoiceChatState.Off) {
+      voiceChat.start(greeting = greetingText.isNotEmpty())
+      if (greetingText.isNotEmpty()) speaker.speak(greetingText, WearSpeechPace(speechSpeed.rate, 0)) { voiceChat.replyFinished() }
+    }
+  }
   LaunchedEffect(greetingText, voiceName) {
     greetingPcm = if (greetingText.isEmpty()) null else WearTalkGreeting.pcm(context, greetingText, voiceName)
   }
@@ -234,7 +269,7 @@ private fun WearDirectContent(
   val microphoneLauncher =
     rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
       if (granted && talkEngine == WearTalkEngine.LowPower) {
-        voiceChat.start()
+        startVoiceChat()
       } else if (granted) {
         runtime.startTalk()
       }
@@ -264,13 +299,19 @@ private fun WearDirectContent(
     if (!talkWanted) return@LaunchedEffect
     if (state.talk.active || voiceActive) {
       talkWanted = false
+      // The Assist button while the watch reads a reply: stop reading and listen.
+      if (voiceChat.state.value == WearVoiceChatState.Speaking) {
+        voiceReading?.cancel()
+        speaker.stop()
+        voiceChat.interrupt()
+      }
     } else if (resumed && state.connected && state.sessionKey != null && !state.talkBusy) {
       // A reconnect flips connected and reruns this effect, which then probes the fresh connection.
       if (!runtime.probeConnection()) return@LaunchedEffect
       talkWanted = false
       when {
         !context.hasPermission(Manifest.permission.RECORD_AUDIO) -> microphoneLauncher.launch(Manifest.permission.RECORD_AUDIO)
-        talkEngine == WearTalkEngine.LowPower && voiceChat.available -> voiceChat.start()
+        talkEngine == WearTalkEngine.LowPower && voiceChat.available -> startVoiceChat()
         else -> runtime.startTalk()
       }
     }
@@ -352,6 +393,7 @@ private fun WearDirectContent(
     val stopAll = {
       talkWanted = false
       if (voiceActive) {
+        voiceReading?.cancel()
         voiceChat.stop()
         speaker.stop()
       } else {
@@ -397,6 +439,13 @@ private fun WearDirectContent(
           if (!state.talk.active && !voiceActive) return@pointerInput
           detectTapGestures(
             onDoubleTap = { if (!voiceActive) runtime.talk.pushToTalkOff() },
+            onTap = {
+              if (voiceActive && voiceChat.state.value == WearVoiceChatState.Speaking) {
+                voiceReading?.cancel()
+                speaker.stop()
+                voiceChat.interrupt()
+              }
+            },
             onPress = {
               touchedAt = System.currentTimeMillis()
               var holding = false
@@ -407,6 +456,7 @@ private fun WearDirectContent(
                     holding = true
                     if (voiceActive) {
                       voiceHeld = true
+                      voiceReading?.cancel()
                       speaker.stop() // a hold interrupts the reply, like speaking over GPT-Live
                       voiceChat.holdStart()
                     } else {
@@ -661,7 +711,7 @@ private fun WearDirectContent(
             voiceActive -> voiceChat.stop()
             state.talk.active -> runtime.stopTalk()
             !context.hasPermission(Manifest.permission.RECORD_AUDIO) -> microphoneLauncher.launch(Manifest.permission.RECORD_AUDIO)
-            talkEngine == WearTalkEngine.LowPower && voiceChat.available -> voiceChat.start()
+            talkEngine == WearTalkEngine.LowPower && voiceChat.available -> startVoiceChat()
             else -> runtime.startTalk()
           }
         }
@@ -755,3 +805,35 @@ private const val PUSH_TO_TALK_HOLD_MS = 300L
 private const val TALK_DIM_BRIGHTNESS = 0.15f
 private const val TALK_BRIGHT_AFTER_TOUCH_MS = 8_000L
 private const val VOICE_CHAT_REPLY_TIMEOUT_MS = 120_000L
+private const val VOICE_CHAT_SEND_RETRY_MS = 10_000L
+
+/** Pauses at least this long listen for an interruption (the recognizer needs about half a second to start). */
+private const val VOICE_CHAT_LISTENING_PAUSE_MS = 2_000L
+private const val VOICE_CHAT_SEND_STEP_MS = 500L
+
+/**
+ * Read a low-power voice chat reply sentence by sentence. Long pauses listen for the user (they are silent, so the mic
+ * does not hear the watch voice): words there end the reply and start the next request. Short pauses just wait.
+ */
+private suspend fun readVoiceReply(
+  text: String,
+  speaker: WearReplySpeaker,
+  voiceChat: WearVoiceChat,
+  rate: Float,
+  pauseMillis: Long,
+) {
+  val sentences = if (pauseMillis > 0) splitSentences(text).ifEmpty { listOf(text) } else listOf(text)
+  sentences.forEachIndexed { index, sentence ->
+    if (index > 0) {
+      if (pauseMillis >= VOICE_CHAT_LISTENING_PAUSE_MS) {
+        val interrupted =
+          suspendCancellableCoroutine { done -> voiceChat.listenDuringPause(pauseMillis) { if (done.isActive) done.resume(it) } }
+        if (interrupted) return
+      } else {
+        delay(pauseMillis)
+      }
+    }
+    suspendCancellableCoroutine { done -> speaker.speak(sentence, WearSpeechPace(rate, 0)) { if (done.isActive) done.resume(Unit) } }
+  }
+  voiceChat.replyFinished()
+}
