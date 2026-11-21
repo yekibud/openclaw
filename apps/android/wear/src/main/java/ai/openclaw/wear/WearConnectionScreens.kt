@@ -50,8 +50,10 @@ import androidx.wear.input.RemoteInputIntentHelper
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlin.coroutines.resume
 
 @Composable
@@ -142,32 +144,62 @@ private fun WearDirectContent(
   var speechPauses by remember { mutableStateOf(settingsStore.read().speechPauses) }
   val solicitedSinceHolder = remember { mutableStateOf<Long?>(null) }
   // Low-power voice chat: watch speech recognition -> Claw (like a typed message) -> watch voice at the user's pace.
-  val voiceSend = remember { mutableStateOf<String?>(null) }
+  // (id, words): a fresh id per utterance keys the send effect, so repeating the same words still sends, and the effect
+  // never changes its own key (clearing it would cancel the send at its first suspension).
+  val voiceSend = remember { mutableStateOf<Pair<Long, String>?>(null) }
   val scope = rememberCoroutineScope()
   var voiceReading by remember { mutableStateOf<Job?>(null) }
   val voiceChat =
     remember {
-      WearVoiceChat(context.applicationContext) { text -> voiceSend.value = text }
+      WearVoiceChat(context.applicationContext) { text -> voiceSend.value = System.nanoTime() to text }
     }
+  val unreachableText = stringResource(R.string.watch_voice_chat_unreachable)
   LaunchedEffect(voiceSend.value) {
-    val text = voiceSend.value ?: return@LaunchedEffect
-    voiceSend.value = null
+    val text = voiceSend.value?.second ?: return@LaunchedEffect
+    // A socket kept from the background can be silently dead: check it first, as Talk does, so words are not lost.
+    if (!runtime.probeConnection()) awaitVoiceConnection(runtime)
     // A previous send can still be waiting for its acknowledgement; retry briefly rather than drop the words.
     val deadline = System.currentTimeMillis() + VOICE_CHAT_SEND_RETRY_MS
-    while (true) {
+    var accepted = false
+    while (!accepted) {
       val sentAt = System.currentTimeMillis()
       awaitingReplySince = sentAt
       solicitedSinceHolder.value = sentAt
-      if (runtime.send(text, runtime.inputOwner())) return@LaunchedEffect
+      accepted = runtime.send(text, runtime.inputOwner())
+      if (accepted) break
       awaitingReplySince = null
       if (System.currentTimeMillis() > deadline) break
       delay(VOICE_CHAT_SEND_STEP_MS)
     }
-    voiceChat.replyMissing()
+    if (accepted && awaitVoiceSendAck(runtime)) return@LaunchedEffect
+    if (accepted) {
+      // No acknowledgement: reconnect and resend once (same idempotency key, so the Gateway cannot run it twice).
+      android.util.Log.w("WearVoiceChat", "send not acknowledged; reconnecting and resending")
+      runtime.probeConnection()
+      awaitVoiceConnection(runtime)
+      withTimeoutOrNull(VOICE_CHAT_ACK_MS) { runtime.state.first { !it.sending } }
+      runtime.retrySend()
+      if (awaitVoiceSendAck(runtime)) return@LaunchedEffect
+    }
+    // Never wait in silence: say it did not get through, then listen (or wait for a hold) again.
+    android.util.Log.w("WearVoiceChat", "send failed; telling the user")
+    awaitingReplySince = null
+    runtime.abandonPendingSend()
+    voiceChat.replyStarted()
+    speaker.speak(unreachableText, WearSpeechPace(speechSpeed.rate, 0)) { voiceChat.replyFinished() }
   }
   DisposableEffect(voiceChat) { onDispose { voiceChat.stop() } }
   val voiceState by voiceChat.state.collectAsState()
   val voiceActive = voiceState != WearVoiceChatState.Off
+  // Wrist-down drops the app into ambient and the background, where Android cuts its network and microphone; the
+  // microphone foreground service that keeps GPT-Live Talk alive does the same for voice chat.
+  LaunchedEffect(voiceActive) {
+    if (voiceActive) {
+      WearTalkForegroundService.start(context)
+    } else if (!runtime.state.value.talk.active) {
+      WearTalkForegroundService.stop(context)
+    }
+  }
   LaunchedEffect(voiceState) {
     // A send that never got a reply (refused while another was pending, failed) must not leave voice chat waiting.
     if (voiceState == WearVoiceChatState.Sending) {
@@ -237,8 +269,17 @@ private fun WearDirectContent(
   // Low-power voice chat greets with the watch voice and starts listening once the greeting has been read.
   val startVoiceChat = {
     if (voiceChat.state.value == WearVoiceChatState.Off) {
+      val cachedGreeting = greetingPcm
       voiceChat.start(greeting = greetingText.isNotEmpty())
-      if (greetingText.isNotEmpty()) speaker.speak(greetingText, WearSpeechPace(speechSpeed.rate, 0)) { voiceChat.replyFinished() }
+      // The cached copy plays at once; the watch voice would first fetch the network voice (about a second).
+      if (cachedGreeting != null && greetingText.isNotEmpty()) {
+        scope.launch {
+          WearTalkGreeting.play(cachedGreeting)
+          voiceChat.replyFinished()
+        }
+      } else if (greetingText.isNotEmpty()) {
+        speaker.speak(greetingText, WearSpeechPace(speechSpeed.rate, 0)) { voiceChat.replyFinished() }
+      }
     }
   }
   LaunchedEffect(greetingText, voiceName) {
@@ -286,7 +327,12 @@ private fun WearDirectContent(
   LaunchedEffect(talkWanted) {
     if (talkWanted) {
       delay(AUTO_TALK_WAIT_MS)
-      talkWanted = false
+      if (talkWanted) {
+        // Never leave an Assist press unanswered: say why nothing started.
+        android.util.Log.w("WearVoiceChat", "assist: gave up waiting (connected=${runtime.state.value.connected})")
+        talkWanted = false
+        speaker.speak(unreachableText)
+      }
     }
   }
   DisposableEffect(view, talkWanted) {
@@ -297,17 +343,33 @@ private fun WearDirectContent(
   val resumed = lifecycleState.isAtLeast(Lifecycle.State.RESUMED)
   LaunchedEffect(talkWanted, resumed, state.connected, state.sessionKey, state.talkBusy, state.talk.active) {
     if (!talkWanted) return@LaunchedEffect
+    android.util.Log.i(
+      "WearVoiceChat",
+      "assist: resumed=$resumed connected=${state.connected} session=${state.sessionKey != null} busy=${state.talkBusy} " +
+        "talk=${state.talk.active} voice=${voiceChat.state.value}",
+    )
     if (state.talk.active || voiceActive) {
       talkWanted = false
       // The Assist button while the watch reads a reply: stop reading and listen.
-      if (voiceChat.state.value == WearVoiceChatState.Speaking) {
+      if (voiceChat.state.value == WearVoiceChatState.Speaking || voiceChat.state.value == WearVoiceChatState.Waiting) {
         voiceReading?.cancel()
         speaker.stop()
         voiceChat.interrupt()
       }
+    } else if (resumed && talkEngine == WearTalkEngine.LowPower && voiceChat.available &&
+      context.hasPermission(Manifest.permission.RECORD_AUDIO)
+    ) {
+      // Voice chat needs the Gateway only to send, and checks the connection then: greet and listen now, while the
+      // connection comes up during the user's first sentence (it took ~6 s after a wake).
+      talkWanted = false
+      runtime.wakeConnection()
+      startVoiceChat()
     } else if (resumed && state.connected && state.sessionKey != null && !state.talkBusy) {
       // A reconnect flips connected and reruns this effect, which then probes the fresh connection.
-      if (!runtime.probeConnection()) return@LaunchedEffect
+      if (!runtime.probeConnection()) {
+        android.util.Log.i("WearVoiceChat", "assist: connection was stale; waiting for the reconnect")
+        return@LaunchedEffect
+      }
       talkWanted = false
       when {
         !context.hasPermission(Manifest.permission.RECORD_AUDIO) -> microphoneLauncher.launch(Manifest.permission.RECORD_AUDIO)
@@ -417,6 +479,7 @@ private fun WearDirectContent(
         WearVoiceChatState.Listening -> stringResource(R.string.watch_voice_chat_listening)
         WearVoiceChatState.Sending -> stringResource(R.string.watch_voice_chat_thinking)
         WearVoiceChatState.Speaking -> stringResource(R.string.watch_voice_chat_speaking)
+        WearVoiceChatState.Waiting -> stringResource(R.string.watch_voice_chat_waiting)
         WearVoiceChatState.Off -> null
       }
     var voiceHeld by remember { mutableStateOf(false) }
@@ -438,7 +501,7 @@ private fun WearDirectContent(
         .pointerInput(state.talk.active, voiceActive) {
           if (!state.talk.active && !voiceActive) return@pointerInput
           detectTapGestures(
-            onDoubleTap = { if (!voiceActive) runtime.talk.pushToTalkOff() },
+            onDoubleTap = { if (voiceActive) voiceChat.openListening() else runtime.talk.pushToTalkOff() },
             onTap = {
               if (voiceActive && voiceChat.state.value == WearVoiceChatState.Speaking) {
                 voiceReading?.cancel()
@@ -796,7 +859,7 @@ private fun decisionLabel(decision: String): String =
   )
 
 private const val INITIAL_TALK_REQUEST = -1
-private const val AUTO_TALK_WAIT_MS = 45_000L
+private const val AUTO_TALK_WAIT_MS = 20_000L
 private const val SOLICITED_NAVIGATION_WINDOW_MS = 5 * 60_000L
 private const val CLOCK_SKEW_MS = 30_000L
 private const val GREETING_HOLD_PAD_MS = 400L
@@ -806,6 +869,8 @@ private const val TALK_DIM_BRIGHTNESS = 0.15f
 private const val TALK_BRIGHT_AFTER_TOUCH_MS = 8_000L
 private const val VOICE_CHAT_REPLY_TIMEOUT_MS = 120_000L
 private const val VOICE_CHAT_SEND_RETRY_MS = 10_000L
+private const val VOICE_CHAT_ACK_MS = 8_000L
+private const val VOICE_CHAT_CONNECT_MS = 10_000L
 
 /** Pauses at least this long listen for an interruption (the recognizer needs about half a second to start). */
 private const val VOICE_CHAT_LISTENING_PAUSE_MS = 2_000L
@@ -837,3 +902,13 @@ private suspend fun readVoiceReply(
   }
   voiceChat.replyFinished()
 }
+
+private suspend fun awaitVoiceConnection(runtime: WearDirectRuntime) {
+  withTimeoutOrNull(VOICE_CHAT_CONNECT_MS) { runtime.state.first { it.connected } }
+}
+
+/** True once the Gateway acknowledged the send (pending cleared); false on timeout or an unconfirmed failure. */
+private suspend fun awaitVoiceSendAck(runtime: WearDirectRuntime): Boolean =
+  withTimeoutOrNull(VOICE_CHAT_ACK_MS) {
+    runtime.state.first { (it.pendingSend == null && !it.sending) || it.sendUnknown }
+  }?.let { !it.sendUnknown } ?: false

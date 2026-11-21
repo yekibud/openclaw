@@ -2,10 +2,13 @@ package ai.openclaw.wear
 
 import ai.openclaw.wear.shared.WearProtocol
 import android.content.Context
+import android.media.AudioFormat
+import android.media.AudioTrack
 import android.os.Bundle
 import android.speech.tts.TextToSpeech
 import android.speech.tts.UtteranceProgressListener
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
@@ -40,6 +43,34 @@ internal object WearTalkGreeting {
     }
 
   fun durationMillis(pcm: ByteArray): Long = pcm.size * 1_000L / (WearProtocol.REALTIME_AUDIO_SAMPLE_RATE_HZ * 2)
+
+  /** Play the cached greeting on the speech output and return when it has finished (or was cancelled). */
+  suspend fun play(pcm: ByteArray) {
+    val track =
+      AudioTrack
+        .Builder()
+        .setAudioAttributes(wearSpeechAudioAttributes)
+        .setAudioFormat(
+          AudioFormat
+            .Builder()
+            .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
+            .setSampleRate(WearProtocol.REALTIME_AUDIO_SAMPLE_RATE_HZ)
+            .setChannelMask(AudioFormat.CHANNEL_OUT_MONO)
+            .build(),
+        ).setTransferMode(AudioTrack.MODE_STATIC)
+        .setBufferSizeInBytes(pcm.size)
+        .build()
+    try {
+      track.write(pcm, 0, pcm.size)
+      track.play()
+      delay(durationMillis(pcm) + GREETING_TAIL_MS)
+    } finally {
+      runCatching { track.stop() }
+      track.release()
+    }
+  }
+
+  private const val GREETING_TAIL_MS = 150L
 
   private suspend fun synthesize(
     context: Context,

@@ -1142,6 +1142,14 @@ internal class WearDirectRuntime(
     return true
   }
 
+  /** Voice chat gave up on a send the Gateway never acknowledged and told the user; let the next utterance go out. */
+  fun abandonPendingSend() {
+    synchronized(lock) {
+      val state = mutableState.value
+      if (!state.sending) mutableState.value = state.copy(pendingSend = null, sendUnknown = false)
+    }
+  }
+
   fun retrySend() {
     val attempt = synchronized(lock) { mutableState.value.pendingSend } ?: return
     send(attempt)

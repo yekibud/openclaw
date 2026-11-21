@@ -14,7 +14,8 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 
-internal enum class WearVoiceChatState { Off, Listening, Sending, Speaking }
+/** [Waiting]: push-to-talk between turns; the mic is off until the next hold (or the Assist button). */
+internal enum class WearVoiceChatState { Off, Listening, Sending, Speaking, Waiting }
 
 /**
  * Low-power voice chat: the watch's speech recognizer turns each utterance into text, which is sent to Claw like a typed
@@ -32,6 +33,11 @@ internal class WearVoiceChat(
   private var recognizer: SpeechRecognizer? = null
   private var lastHeardMillis = 0L
   private var held = false
+
+  // After the first hold the session is push-to-talk: no open mic after replies, so nothing is heard by accident and
+  // there is nothing to end with "that will be all"; it closes itself after PUSH_TO_TALK_IDLE_MS.
+  private var pushToTalkOnly = false
+  private val closeIfIdle = Runnable { if (_state.value == WearVoiceChatState.Waiting) stop() }
   private var speechActive = false
   private var sendOnResult = false
 
@@ -71,6 +77,10 @@ internal class WearVoiceChat(
   /** A tap or the Assist button during the reply: stop reading and listen now. */
   fun interrupt() =
     main.post {
+      if (_state.value == WearVoiceChatState.Waiting) {
+        listen() // the Assist button while waiting: one hands-free request
+        return@post
+      }
       if (_state.value != WearVoiceChatState.Speaking) return@post
       Log.i(TAG, "interrupted by touch")
       endBargeIn(interrupted = true)
@@ -94,10 +104,12 @@ internal class WearVoiceChat(
       if (greeting) _state.value = WearVoiceChatState.Speaking else listen()
     }
 
-  fun stop() =
+  fun stop(): Boolean =
     main.post {
       if (_state.value != WearVoiceChatState.Off) Log.i(TAG, "stop")
       endBargeIn(interrupted = true)
+      main.removeCallbacks(closeIfIdle)
+      pushToTalkOnly = false
       held = false
       sendOnResult = false
       heard.clear()
@@ -116,7 +128,7 @@ internal class WearVoiceChat(
       // Already listening: a hold interrupted the reply and started listening itself.
       if (_state.value == WearVoiceChatState.Off || _state.value == WearVoiceChatState.Listening) return@post
       lastHeardMillis = SystemClock.elapsedRealtime()
-      listen()
+      if (pushToTalkOnly) waitForHold() else listen()
     }
 
   /** No reply came (failed send, timeout): listen again rather than leave voice chat stuck. */
@@ -130,6 +142,9 @@ internal class WearVoiceChat(
     main.post {
       if (_state.value == WearVoiceChatState.Off) return@post
       held = true
+      if (!pushToTalkOnly) Log.i(TAG, "push-to-talk on")
+      pushToTalkOnly = true
+      main.removeCallbacks(closeIfIdle)
       sendOnResult = false
       main.removeCallbacks(sendIfQuiet)
       endBargeIn(interrupted = true)
@@ -146,10 +161,30 @@ internal class WearVoiceChat(
         recognizer?.stopListening() // ends the utterance now; onResults sends it
       } else if (heard.isNotEmpty()) {
         send()
+      } else {
+        waitForHold() // a hold with nothing understood: back to waiting, not to an open mic
       }
     }
 
+  /** Double tap: back to hands-free listening after replies. */
+  fun openListening() =
+    main.post {
+      if (_state.value == WearVoiceChatState.Off) return@post
+      pushToTalkOnly = false
+      main.removeCallbacks(closeIfIdle)
+      if (_state.value == WearVoiceChatState.Waiting) listen()
+    }
+
+  private fun waitForHold() {
+    recognizer?.cancel()
+    speechActive = false
+    _state.value = WearVoiceChatState.Waiting
+    main.removeCallbacks(closeIfIdle)
+    main.postDelayed(closeIfIdle, PUSH_TO_TALK_IDLE_MS)
+  }
+
   private fun listen() {
+    main.removeCallbacks(closeIfIdle)
     speechActive = false
     _state.value = WearVoiceChatState.Listening
     startRecognizer()
@@ -263,6 +298,8 @@ internal class WearVoiceChat(
           // Silence after what was already said: the utterance is complete.
           heard.isNotEmpty() && !held -> send()
 
+          !held && pushToTalkOnly -> waitForHold()
+
           !held && idleTooLong() -> stop()
 
           else -> main.postDelayed({ if (_state.value == WearVoiceChatState.Listening) listen() }, RETRY_DELAY_MS)
@@ -298,6 +335,7 @@ internal class WearVoiceChat(
     const val FOLLOW_UP_MS = 1_500L
     const val IDLE_MILLIS = 30_000L
     const val RETRY_DELAY_MS = 300L
+    const val PUSH_TO_TALK_IDLE_MS = 90_000L
     const val BARGE_IN_MIN_RESTART_MS = 1_200L
   }
 }
