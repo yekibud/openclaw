@@ -364,7 +364,10 @@ internal fun OpenClawWearApp(
     if (reply != null) {
       view.performHapticFeedback(HapticFeedbackConstants.CONFIRM)
       // STARTED rather than RESUMED: a reply can land while the screen is dimming, which pauses the activity first.
-      if (autoSpeak && lifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)) speaker.speak(reply.text)
+      if (autoSpeak && lifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)) {
+        (view.context.applicationContext as? WearApplication)?.spokenLog?.reply(reply.text)
+        speaker.speak(reply.text)
+      }
     }
   }
 

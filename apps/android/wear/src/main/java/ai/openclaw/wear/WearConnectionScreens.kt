@@ -134,6 +134,7 @@ private fun WearDirectContent(
   // Direct mode owns its own reply speaker: the phone-proxy UI's speaker and auto-speak never run here.
   val settingsStore = remember { WearSettingsStore(context) }
   val speaker = remember { WearReplySpeaker(context.applicationContext, settingsStore.read().voiceName) }
+  val spokenLog = (context.applicationContext as? WearApplication)?.spokenLog
   val availableVoices by speaker.availableVoices.collectAsState()
   var voiceName by remember { mutableStateOf(settingsStore.read().voiceName) }
   DisposableEffect(speaker) { onDispose { speaker.shutdown() } }
@@ -187,6 +188,7 @@ private fun WearDirectContent(
     awaitingReplySince = null
     runtime.abandonPendingSend()
     voiceChat.replyStarted()
+    spokenLog?.record(WearSpokenLog.Source.NOTICE, unreachableText)
     speaker.speak(unreachableText, WearSpeechPace(speechSpeed.rate, 0)) { voiceChat.replyFinished() }
   }
   DisposableEffect(voiceChat) { onDispose { voiceChat.stop() } }
@@ -236,10 +238,12 @@ private fun WearDirectContent(
     if (voiceActive && voiceChat.state.value == WearVoiceChatState.Listening) {
       // The user is already saying something new (a hold during the wait); the reply stays on screen unread.
     } else if (voiceActive) {
+      spokenLog?.reply(reply.text)
       voiceChat.replyStarted()
       voiceReading?.cancel()
       voiceReading = scope.launch { readVoiceReply(reply.text, speaker, voiceChat, speechSpeed.rate, speechPauses.millis) }
     } else if (autoSpeak) {
+      spokenLog?.reply(reply.text)
       speaker.speak(reply.text)
     }
   }
@@ -278,6 +282,7 @@ private fun WearDirectContent(
           // The saved copy plays at once (on a cold start it is read from the cache file, ~ms); the watch voice would
           // first fetch the network voice. Only a missing copy falls back to it.
           val cached = greetingPcm ?: WearTalkGreeting.pcm(context, greetingText, voiceName)?.also { greetingPcm = it }
+          spokenLog?.record(WearSpokenLog.Source.GREETING, greetingText)
           if (cached != null) {
             WearTalkGreeting.play(cached)
             voiceChat.replyFinished()
@@ -337,6 +342,7 @@ private fun WearDirectContent(
         // Never leave an Assist press unanswered: say why nothing started.
         android.util.Log.w("WearVoiceChat", "assist: gave up waiting (connected=${runtime.state.value.connected})")
         talkWanted = false
+        spokenLog?.record(WearSpokenLog.Source.NOTICE, unreachableText)
         speaker.speak(unreachableText)
       }
     }
@@ -671,6 +677,7 @@ private fun WearDirectContent(
           voiceName = next
           settingsStore.writeVoice(next)
           speaker.setVoice(next)
+          spokenLog?.record(WearSpokenLog.Source.PREVIEW, "This is how I will read your replies.")
           speaker.speak("This is how I will read your replies.", WearSpeechPace(speechSpeed.rate, 0L), onDone = null)
         }
       }
@@ -687,6 +694,7 @@ private fun WearDirectContent(
         SecondaryButton(stringResource(R.string.watch_speech_speed) + ": " + speechSpeed.rawValue, true) {
           speechSpeed = WearSpeechSpeed.entries[(speechSpeed.ordinal + 1) % WearSpeechSpeed.entries.size]
           settingsStore.writeSpeechSpeed(speechSpeed)
+          spokenLog?.record(WearSpokenLog.Source.PREVIEW, "This is my reading speed. And this is the next sentence.")
           speaker.speak("This is my reading speed. And this is the next sentence.", WearSpeechPace(speechSpeed.rate, speechPauses.millis), onDone = null)
         }
       }
@@ -802,16 +810,22 @@ private fun WearDirectContent(
         }
       }
       state.messages.forEach { message ->
-        item { MessageBubble(message.chatRole, parseReplyNavigation(message.text).text, truncated = message.textTruncated == true, onOpenReply = { openReply = runtime.openReply(message, state) }) }
+        item { MessageBubble(message.chatRole, parseReplyNavigation(WearSpokenLog.withoutNote(message.text)).text, truncated = message.textTruncated == true, onOpenReply = { openReply = runtime.openReply(message, state) }) }
       }
       state.streamText?.let { text -> item { StreamingBubble(text) } }
       state.pendingSend?.let { pending ->
-        item { MessageBubble(WearChatRole.USER, pending.message, truncated = false, onOpenReply = {}) }
+        item { MessageBubble(WearChatRole.USER, WearSpokenLog.withoutNote(pending.message), truncated = false, onOpenReply = {}) }
       }
       if (latestAssistant != null) {
         item {
           SecondaryButton(stringResource(if (speaking) R.string.stop_speaking else R.string.speak_reply), true) {
-            if (speaking) speaker.stop() else speaker.speak(parseReplyNavigation(latestAssistant.text).text)
+            if (speaking) {
+              speaker.stop()
+            } else {
+              val text = parseReplyNavigation(latestAssistant.text).text
+              spokenLog?.reply(text)
+              speaker.speak(text)
+            }
           }
         }
       }

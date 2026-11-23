@@ -68,6 +68,7 @@ import {
 } from "./chat-abort-lifecycle-internal.js";
 import { appendChatCanvasBlocksToMessage } from "./chat-display-projection.canvas.js";
 import { resolveChatRunOwnerAgentId } from "./chat-run-owner.js";
+import { logUnpersistedChatTerminal } from "./chat-terminal-log.js";
 import type { GatewayBroadcastFn } from "./server-broadcast-types.js";
 import { createChatAbortMarker, type ChatRunState } from "./server-chat-state.js";
 import type { GatewayContextResolver } from "./server-methods/types.js";
@@ -527,6 +528,7 @@ export function abortChatRunById(
       ...(errorMessage ? { errorMessage } : {}),
       message: message ? { ...message, timestamp: Date.now() } : undefined,
     };
+    logUnpersistedChatTerminal(payload);
     const deliverySessionKeys = resolveChatAbortDeliverySessionKeys(
       ops,
       sessionKey,

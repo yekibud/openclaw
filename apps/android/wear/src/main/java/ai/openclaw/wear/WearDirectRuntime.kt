@@ -60,6 +60,7 @@ import java.util.UUID
 // longer than a few seconds, so keep retrying for 30 s before parking the message for a manual Retry.
 private const val LEASE_WAIT_ATTEMPTS = 60
 private const val LEASE_WAIT_STEP_MS = 500L
+private const val MAX_SEND_CHARS = 4000
 
 internal val wearOperatorScopePolicy =
   GatewayOperatorScopePolicy(
@@ -142,6 +143,7 @@ internal class WearDirectRuntime(
   private val store: WearGatewayStore = WearGatewayStore.create(context),
 ) {
   private val identity = DeviceIdentityStore.withPrefs(context, store)
+  private val spokenLog: WearSpokenLog? get() = (context.applicationContext as? WearApplication)?.spokenLog
   private val tokens = DeviceAuthStore(store)
   private val lock = Any()
   private val cleanup = Mutex()
@@ -1128,13 +1130,15 @@ internal class WearDirectRuntime(
     message: String,
     input: WearInputOwner,
   ): Boolean {
-    val text = applySpokenDirectives(message.trim()).takeIf { it.isNotEmpty() && it.length <= 4000 } ?: return false
+    val text = applySpokenDirectives(message.trim()).takeIf { it.isNotEmpty() && it.length <= MAX_SEND_CHARS } ?: return false
     val attempt =
       synchronized(lock) {
         val state = mutableState.value
         if (input != inputOwner() || state.pendingSend != null || state.sending || state.sendUnknown) return false
+        val sessionKey = state.sessionKey ?: return false
+        val note = spokenLog?.takeNoteForNextMessage().orEmpty()
         // Input can return before foreground reconnection is ready. Retain it without automatic replay.
-        WearDirectSend(state.sessionKey ?: return false, text, state.sessionAgentId).also {
+        WearDirectSend(sessionKey, (note + text).take(MAX_SEND_CHARS), state.sessionAgentId).also {
           mutableState.value = state.copy(pendingSend = it, error = null)
         }
       }
@@ -1407,6 +1411,7 @@ internal class WearDirectRuntime(
         val state = mutableState.value
         val message = directChatMessage(obj["message"])
         val terminal = obj.text("state") in setOf("final", "aborted", "error")
+        if (obj.text("state") in setOf("aborted", "error")) message?.text?.let { spokenLog?.markUnsaved(it) }
         val run = obj.text("runId")
         val settlesRun = state.runId == null || state.runId == run
         // A displayed run and a newly submitted send can differ. Settling the former

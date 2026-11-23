@@ -9,6 +9,7 @@ import {
   markChatAbortTerminalOutcome,
 } from "../chat-abort-lifecycle-internal.js";
 import { projectChatDisplayMessage } from "../chat-display-projection.js";
+import { logUnpersistedChatTerminal } from "../chat-terminal-log.js";
 import { capLiveAssistantText } from "../live-chat-projector.js";
 import type { GatewayBroadcastOpts } from "../server-broadcast-types.js";
 import { tryResolveSessionCompatibilityOwnerAgentId } from "../session-request-agent.js";
@@ -229,6 +230,7 @@ export function broadcastChatTerminal(params: ChatTerminalBroadcastParams & Chat
     return;
   }
   markChatAbortTerminalOutcome(params.terminalEntry);
+  logUnpersistedChatTerminal(params);
   broadcastChatFrame(params);
   params.context.agentRunSeq.delete(params.runId);
 }

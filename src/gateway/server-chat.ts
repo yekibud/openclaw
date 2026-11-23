@@ -37,6 +37,7 @@ import {
   appendChatCanvasBlocksToMessage,
   extractChatToolResultCanvasPreview,
 } from "./chat-display-projection.canvas.js";
+import { logUnpersistedChatTerminal } from "./chat-terminal-log.js";
 import { shouldSuppressAssistantEventForLiveChat } from "./live-chat-projector.js";
 import type {
   GatewayBroadcastFn,
@@ -537,6 +538,7 @@ export function createAgentEventHandler({
               if (payload.message) {
                 emitFirstAssistantChatSendTiming(terminalDelivery.firstAssistantTimingEntry);
               }
+              logUnpersistedChatTerminal(payload);
               sendLivePayload("chat", terminalSessionKey, payload, terminalDelivery);
               return;
             }
@@ -560,6 +562,7 @@ export function createAgentEventHandler({
               ...(errorDetail ? { errorDetail } : {}),
               ...(terminalStopReason && { stopReason: terminalStopReason }),
             };
+            logUnpersistedChatTerminal(payload);
             sendLivePayload("chat", terminalSessionKey, payload, terminalDelivery);
           };
           const publish = () => {

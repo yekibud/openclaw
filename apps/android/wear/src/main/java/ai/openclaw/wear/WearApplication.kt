@@ -7,6 +7,7 @@ import android.os.PowerManager
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import java.io.File
 import java.util.concurrent.atomic.AtomicInteger
 
 class WearApplication : Application() {
@@ -17,6 +18,8 @@ class WearApplication : Application() {
   }
 
   internal val directRuntime: WearDirectRuntime by lazy { WearDirectRuntime(this, processScope) }
+
+  internal val spokenLog: WearSpokenLog by lazy { WearSpokenLog(File(filesDir, WearSpokenLog.FILE_NAME)) }
 
   internal val gatewayRepository: WearGatewayRepository by lazy {
     WearGatewayRepository(proxyClient)
