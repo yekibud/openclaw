@@ -114,6 +114,7 @@ class MainActivity : ComponentActivity() {
   override fun onCreate(savedInstanceState: Bundle?) {
     installSplashScreen()
     super.onCreate(savedInstanceState)
+    tickIfAssist(intent)
     if (screenshotModeEnabled) {
       screenshotScene = parseWearScreenshotModeIntent(intent)
     }
@@ -138,6 +139,7 @@ class MainActivity : ComponentActivity() {
 
   override fun onNewIntent(intent: Intent) {
     super.onNewIntent(intent)
+    tickIfAssist(intent)
     setIntent(intent)
     if (shouldRecreateForScreenshotMode(screenshotScene, intent, screenshotModeEnabled)) {
       recreate()
@@ -145,6 +147,16 @@ class MainActivity : ComponentActivity() {
     }
     launchState = launchState.next(intent)
     if (screenshotScene == null) (application as WearApplication).directRuntime.wakeConnection()
+  }
+
+  /** A tick the moment the Assist press reaches the app: a cold start shows nothing for several seconds. */
+  private fun tickIfAssist(intent: Intent?) {
+    if (parseWearLaunchTarget(intent) != WearLaunchTarget.Voice) return
+    runCatching {
+      getSystemService(android.os.VibratorManager::class.java)
+        .defaultVibrator
+        .vibrate(android.os.VibrationEffect.createPredefined(android.os.VibrationEffect.EFFECT_TICK))
+    }
   }
 
   override fun onStart() {

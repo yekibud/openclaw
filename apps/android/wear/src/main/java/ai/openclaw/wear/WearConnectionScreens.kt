@@ -8,6 +8,7 @@ import android.Manifest
 import android.app.Activity
 import android.app.RemoteInput
 import android.content.Intent
+import android.os.SystemClock
 import android.view.WindowManager
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -266,19 +267,24 @@ private fun WearDirectContent(
   // is withheld from the model while it plays so the model does not answer the greeting.
   val greetingText = remember { settingsStore.read().talkGreeting.trim() }
   var greetingPcm by remember { mutableStateOf<ByteArray?>(null) }
+  var voiceStartedAt by remember { mutableStateOf(0L) }
   // Low-power voice chat greets with the watch voice and starts listening once the greeting has been read.
   val startVoiceChat = {
     if (voiceChat.state.value == WearVoiceChatState.Off) {
-      val cachedGreeting = greetingPcm
+      voiceStartedAt = SystemClock.elapsedRealtime()
       voiceChat.start(greeting = greetingText.isNotEmpty())
-      // The cached copy plays at once; the watch voice would first fetch the network voice (about a second).
-      if (cachedGreeting != null && greetingText.isNotEmpty()) {
+      if (greetingText.isNotEmpty()) {
         scope.launch {
-          WearTalkGreeting.play(cachedGreeting)
-          voiceChat.replyFinished()
+          // The saved copy plays at once (on a cold start it is read from the cache file, ~ms); the watch voice would
+          // first fetch the network voice. Only a missing copy falls back to it.
+          val cached = greetingPcm ?: WearTalkGreeting.pcm(context, greetingText, voiceName)?.also { greetingPcm = it }
+          if (cached != null) {
+            WearTalkGreeting.play(cached)
+            voiceChat.replyFinished()
+          } else {
+            speaker.speak(greetingText, WearSpeechPace(speechSpeed.rate, 0)) { voiceChat.replyFinished() }
+          }
         }
-      } else if (greetingText.isNotEmpty()) {
-        speaker.speak(greetingText, WearSpeechPace(speechSpeed.rate, 0)) { voiceChat.replyFinished() }
       }
     }
   }
@@ -350,8 +356,10 @@ private fun WearDirectContent(
     )
     if (state.talk.active || voiceActive) {
       talkWanted = false
-      // The Assist button while the watch reads a reply: stop reading and listen.
-      if (voiceChat.state.value == WearVoiceChatState.Speaking || voiceChat.state.value == WearVoiceChatState.Waiting) {
+      // The Assist button while the watch reads a reply: stop reading and listen. Presses right after the start are
+      // repeats from a slow launch, not interruptions: they must not cut off the greeting.
+      val repeatPress = SystemClock.elapsedRealtime() - voiceStartedAt < ASSIST_REPEAT_GRACE_MS
+      if (!repeatPress && (voiceChat.state.value == WearVoiceChatState.Speaking || voiceChat.state.value == WearVoiceChatState.Waiting)) {
         voiceReading?.cancel()
         speaker.stop()
         voiceChat.interrupt()
@@ -860,6 +868,7 @@ private fun decisionLabel(decision: String): String =
 
 private const val INITIAL_TALK_REQUEST = -1
 private const val AUTO_TALK_WAIT_MS = 20_000L
+private const val ASSIST_REPEAT_GRACE_MS = 6_000L
 private const val SOLICITED_NAVIGATION_WINDOW_MS = 5 * 60_000L
 private const val CLOCK_SKEW_MS = 30_000L
 private const val GREETING_HOLD_PAD_MS = 400L

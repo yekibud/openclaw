@@ -56,6 +56,13 @@ class WearTalkStopPhraseTest {
       "That is it",
       "Stop, thank you so much",
       "Okay, we're done for now, thanks",
+      "that would be all",
+      "That should be all, thanks",
+      "That'd be all.",
+      "that will be it",
+      "That'll do",
+      "Nothing else, thanks",
+      "OK, that's everything",
     ).forEach { org.junit.Assert.assertTrue(it, isTalkStopPhrase(it)) }
   }
 
@@ -79,6 +86,9 @@ class WearTalkStopPhraseTest {
       "Stop, wait, I want to add something else to the list first",
       "Please don't stop",
       "No stop, keep going",
+      "That would be all the eggs we need?",
+      "Is there nothing else on my list today?",
+      "That'll do for the groceries, now add a reminder to call Mom",
     ).forEach { org.junit.Assert.assertFalse(it, isTalkStopPhrase(it)) }
   }
 }
