@@ -7,7 +7,11 @@ import {
 import { runSessionCompactionIfNeeded } from "./agent-runner-memory.js";
 import { createTestFollowupRun } from "./agent-runner.test-fixtures.js";
 
-const { compact, account } = vi.hoisted(() => ({ compact: vi.fn(), account: vi.fn() }));
+const { compact, account, preflightWarn } = vi.hoisted(() => ({
+  compact: vi.fn(),
+  account: vi.fn(),
+  preflightWarn: vi.fn(),
+}));
 
 // mock-isolation: Exercise preflight admission without starting a model runtime.
 vi.mock("../../agents/embedded-agent.js", () => ({ compactEmbeddedAgentSession: compact }));
@@ -22,6 +26,19 @@ vi.mock("./agent-runner-memory-transcript-context.js", () => ({
 vi.mock("../../gateway/session-transcript-readers.js", () => ({
   readSessionTranscriptAccountingAsync: async () => ({ byteSize: 102_400 }),
 }));
+// mock-isolation: Observe the preflight warnings that explain a bounded turn.
+vi.mock("../../logging/subsystem.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../logging/subsystem.js")>();
+  return {
+    ...actual,
+    createSubsystemLogger: (name: string) => {
+      const logger = actual.createSubsystemLogger(name);
+      return name === "auto-reply/preflight-compaction"
+        ? Object.assign(Object.create(logger), { warn: preflightWarn })
+        : logger;
+    },
+  };
+});
 // mock-isolation: Observe admission accounting without starting database workers.
 vi.mock("./session-updates.js", () => ({ incrementCompactionCount: account }));
 
@@ -51,6 +68,7 @@ it.each([
           return params.amount ?? 1;
         },
       );
+    preflightWarn.mockReset();
     const followupRun = createTestFollowupRun({ provider: "openai", model: "gpt-5.5" });
     const notice = vi.fn();
     const params: Parameters<typeof runSessionCompactionIfNeeded>[0] = {
@@ -81,6 +99,14 @@ it.each([
       },
     });
     expect(notice.mock.calls.map(([phase]) => phase)).toContain("context_bounded");
+    if (!ok) {
+      expect(preflightWarn).toHaveBeenCalledWith(
+        expect.stringMatching(
+          /^context bounded: cause=compaction_failed:fixture declines compaction .*activeBytes=102400 maxBytes=32768 /,
+        ),
+      );
+    }
+    preflightWarn.mockClear();
     notice.mockClear().mockRejectedValueOnce(new Error("fixture notice delivery failed"));
     await runSessionCompactionIfNeeded({
       ...params,
@@ -88,5 +114,8 @@ it.each([
     });
     expect(compact).toHaveBeenCalledOnce();
     expect(notice.mock.calls.map(([phase]) => phase)).toContain("context_bounded");
+    expect(preflightWarn).toHaveBeenCalledWith(
+      expect.stringMatching(/^context bounded: cause=byte_compaction_latched .*latchBytes=102400 /),
+    );
   },
 );

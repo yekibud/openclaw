@@ -260,7 +260,18 @@ export async function runSessionCompactionIfNeeded(params: {
   }
   const shouldCompactByTranscriptBytes =
     exceedsTranscriptByteThreshold && !transcriptByteCompactionLatched;
+  const logContextBounded = (cause: string) => {
+    preflightCompactionLog.warn(
+      `context bounded: cause=${cause} sessionKey=${params.sessionKey} sessionId=${entry?.sessionId ?? "-"} ` +
+        `activeBytes=${activeTranscriptBytes ?? "-"} maxBytes=${maxActiveTranscriptBytes ?? "-"} ` +
+        `latchBytes=${refreshedTranscriptByteCompactionLatch?.activeBytes ?? "-"} ` +
+        `persistedTokens=${freshPersistedTokens ?? "-"} transcriptTokens=${transcriptUsageTokens ?? "-"} ` +
+        `promptTokens=${promptTokenEstimate} threshold=${threshold} contextWindow=${contextWindowTokens}`,
+    );
+  };
   if (transcriptByteCompactionLatched) {
+    // A byte compaction already failed or made no progress; until the transcript grows by another maxBytes it stays bounded.
+    logContextBounded("byte_compaction_latched");
     await notifyCompaction("context_bounded");
     assertActive();
   }
@@ -456,6 +467,7 @@ export async function runSessionCompactionIfNeeded(params: {
       if (exceedsTranscriptByteThreshold) {
         await recordCompactionAccounting(expectedSession, undefined, undefined, 0);
         assertActive();
+        logContextBounded(`compaction_failed:${reason}`);
         await notifyCompaction("context_bounded");
         return compactionStore[compactionSessionKey] ?? entry;
       }
