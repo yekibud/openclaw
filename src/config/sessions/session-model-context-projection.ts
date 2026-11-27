@@ -218,18 +218,55 @@ export function projectResetBoundaryNavigationSql(
     "customType",
     "display",
   ]);
+  const pick = (path: string, keys: readonly string[]) => {
+    const picked = jsonPickObject(db, jsonPathValue(db, event, sql.lit(path)), keys);
+    // The scalar subquery loses SQLite's JSON subtype before embedding its object.
+    return isPostgresSqlConnection(db)
+      ? picked
+      : getNodeSqliteKysely(db).fn<string>("json", [picked]);
+  };
+  const navigation = jsonSetPath(
+    db,
+    entry,
+    sql.lit("$.message"),
+    jsonObjectValue(db, {
+      role: jsonPathValue(db, event, sql.lit("$.message.role")),
+    }),
+    true,
+  );
+  // Tail preservation pairs placements with their pending results, so both keep their markers.
+  const pendingResult = jsonSetPath(
+    db,
+    entry,
+    sql.lit("$.message"),
+    pick("$.message", [
+      "role",
+      "provider",
+      "model",
+      "excludeFromContext",
+      "openclawModelPlacement",
+    ]),
+    true,
+  );
+  const placement = jsonSetPath(
+    db,
+    navigation,
+    sql.lit("$.data"),
+    pick("$.data", ["afterEntryId", "resultEntryIds"]),
+    true,
+  );
+  const field = (path: string) => jsonPathValue(db, event, sql.lit(path));
   // Malformed rows must reach JSON.parse unchanged; CASE guards the native projection.
   return /* kysely-allow-raw: reset planning uses navigation metadata, never durable transcript payloads. */ sql<string>`CASE WHEN ${jsonNativeFieldsValid(db, event)} THEN
     CASE WHEN ${jsonType(db, event)} = 'object' THEN
-      ${jsonSetPath(
-        db,
-        entry,
-        sql.lit("$.message"),
-        jsonObjectValue(db, {
-          role: jsonPathValue(db, event, sql.lit("$.message.role")),
-        }),
-        true,
-      )}
+      CASE WHEN ${field("$.type")} = 'custom'
+        AND ${field("$.customType")} = ${BACKGROUND_RESULT_PLACEMENT_CUSTOM_TYPE}
+      THEN ${placement}
+      WHEN ${field("$.type")} = 'message'
+        AND ${field("$.message.provider")} = 'openclaw'
+        AND ${field("$.message.model")} = 'automation-result'
+      THEN ${pendingResult}
+      ELSE ${navigation} END
     ELSE ${event} END
     ELSE ${event} END`;
 }

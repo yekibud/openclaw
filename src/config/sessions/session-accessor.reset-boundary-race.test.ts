@@ -1,5 +1,6 @@
 import { isRecord } from "@openclaw/normalization-core/record-coerce";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import { BACKGROUND_RESULT_PLACEMENT_CUSTOM_TYPE } from "../../../packages/agent-core/src/harness/session/background-result-placement.js";
 import * as agentDatabase from "../../state/openclaw-agent-db.js";
 import {
   applySessionEntryLifecycleMutation,
@@ -15,6 +16,7 @@ import {
 } from "./session-accessor.sqlite-active-events.js";
 import { loadTranscriptEventsFromDatabase } from "./session-accessor.sqlite-read.js";
 import { appendTranscriptMessageSync } from "./session-accessor.sqlite-transcript-write.kernel.js";
+import { buildSessionResetBoundaryEvent } from "./session-reset-boundary-event.js";
 import { resolveSqliteTargetFromSessionStorePath } from "./session-sqlite-target.js";
 import { useTempSessionsFixture } from "./test-helpers.js";
 import { createTranscriptEventInserter } from "./transcript-payload.js";
@@ -202,4 +204,76 @@ it("preserves navigation nulls and raw parser semantics in reset reads", async (
   for (const projection of [undefined, "reset-boundary"] as const) {
     expect(() => read({ projection })).toThrow(SyntaxError);
   }
+});
+
+it("plans a preserve-tail reset over placed background results read from SQLite", async () => {
+  const sessionId = "reset-placement";
+  await upsertSessionEntryCore(
+    { sessionKey: "agent:main:reset-placement", storePath },
+    { sessionId, updatedAt: 10 },
+  );
+  const database = agentDatabase.openOpenClawAgentDatabase({
+    agentId: "main",
+    path: resolveSqliteTargetFromSessionStorePath(storePath, { agentId: "main" }).path,
+  });
+  const placement = {
+    type: "custom",
+    id: "placement",
+    parentId: "user",
+    timestamp: "2026-07-22T00:00:02.000Z",
+    customType: BACKGROUND_RESULT_PLACEMENT_CUSTOM_TYPE,
+    data: { afterEntryId: "user", resultEntryIds: ["result"], ignored: "payload" },
+  };
+  const events = [
+    {
+      type: "message",
+      id: "result",
+      parentId: null,
+      timestamp: "2026-07-22T00:00:00.000Z",
+      message: {
+        role: "assistant",
+        content: [{ type: "text", text: "background" }],
+        provider: "openclaw",
+        model: "automation-result",
+        excludeFromContext: true,
+        openclawModelPlacement: "pending",
+      },
+    },
+    {
+      type: "message",
+      id: "user",
+      parentId: "result",
+      timestamp: "2026-07-22T00:00:01.000Z",
+      message: { role: "user", content: "question" },
+    },
+    placement,
+    {
+      type: "message",
+      id: "assistant",
+      parentId: "placement",
+      timestamp: "2026-07-22T00:00:03.000Z",
+      message: { role: "assistant", content: "answer" },
+    },
+  ];
+  const insert = createTranscriptEventInserter(database.db, sessionId);
+  events.forEach((event, seq) => insert({ seq, eventJson: JSON.stringify(event), createdAt: seq }));
+
+  const projected = loadTranscriptEventsFromDatabase(database, sessionId, {
+    projection: "reset-boundary",
+  });
+  expect(projected.find((event) => isRecord(event) && event.id === "placement")).toMatchObject({
+    data: { afterEntryId: "user", resultEntryIds: ["result"] },
+  });
+  expect(projected[2]).not.toHaveProperty("data.ignored");
+  const boundary = buildSessionResetBoundaryEvent({
+    events: projected,
+    context: "preserve-tail",
+    reason: "daily",
+  });
+  expect(boundary).toMatchObject({
+    type: "reset",
+    parentId: "assistant",
+    reason: "daily",
+    firstKeptEntryId: "user",
+  });
 });

@@ -7,7 +7,7 @@ import {
   readBackgroundResultPlacement,
 } from "../../../packages/agent-core/src/harness/session/background-result-placement.js";
 import { iterateSessionContextEntries } from "../../../packages/agent-core/src/harness/session/session.js";
-import { isIndexedSessionEntry } from "./session-entry-codec.js";
+import type { SessionEntry } from "../../agents/sessions/session-manager-types.js";
 import { selectRecentUserAssistantReplayRecords } from "./transcript-replay.js";
 import { selectSessionTranscriptLeafControlledPath } from "./transcript-tree.js";
 
@@ -47,6 +47,11 @@ export function createSessionResetBoundaryId(): string {
   return randomUUID();
 }
 
+/** Reset reads carry navigation projections, not the payloads the full entry codec requires. */
+function isNavigationEntry(entry: unknown): entry is SessionEntry {
+  return typeof asOptionalRecord(entry)?.type === "string" && recordId(entry) !== undefined;
+}
+
 function projectLatestBoundaryWindow(entries: readonly unknown[]): unknown[] {
   if (
     entries.some(
@@ -56,7 +61,7 @@ function projectLatestBoundaryWindow(entries: readonly unknown[]): unknown[] {
     )
   ) {
     return Array.from(
-      iterateSessionContextEntries(entries.filter(isIndexedSessionEntry)),
+      iterateSessionContextEntries(entries.filter(isNavigationEntry)),
       ({ entry, placement }) =>
         placement && entry.type === "message"
           ? {
